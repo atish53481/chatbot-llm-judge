@@ -34,6 +34,15 @@ class HttpTargetClient(ChatbotClient):
         self.message_field = config.get("message_field", "message")
         self.response_path = config.get("response_path", "reply")
         self.headers = config.get("headers", {})
+        self.request_format = config.get("request_format", "flat")
+        self.model = config.get("model")
+
+        # Validate request_format
+        valid_formats = {"flat", "openai_messages"}
+        if self.request_format not in valid_formats:
+            raise ValueError(
+                f"request_format must be one of {valid_formats}, got {self.request_format!r}"
+            )
 
     def health(self) -> dict:
         r = requests.get(f"{self.base_url}{self.health_path}", timeout=10)
@@ -41,9 +50,21 @@ class HttpTargetClient(ChatbotClient):
         return r.json()
 
     def chat(self, message: str, history: list[dict] | None = None) -> ChatReply:
-        payload = {self.message_field: message}
-        if history:
-            payload["history"] = history
+        # Build payload based on request_format
+        if self.request_format == "flat":
+            payload = {self.message_field: message}
+            if history:
+                payload["history"] = history
+        elif self.request_format == "openai_messages":
+            messages = list(history or [])
+            messages.append({"role": "user", "content": message})
+            payload = {"messages": messages}
+            if self.model:
+                payload["model"] = self.model
+        else:
+            # This should never happen due to validation in __init__
+            raise ValueError(f"Unknown request_format: {self.request_format}")
+
         r = requests.post(
             f"{self.base_url}{self.chat_path}",
             json=payload,
