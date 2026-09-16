@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "AI Chatbot Assistant",
+  "version": "1.0.0",
+  "description": "Simple chatbot extension for practice with DeepEval testing",
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "AI Chatbot"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "storage"
+  ]
+}
