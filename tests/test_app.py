@@ -233,3 +233,28 @@ def test_cors_allows_only_the_extension_origin(client):
 def test_rejects_foreign_host_header(app_module):
     rebinding = TestClient(app_module.app, base_url="http://evil.example")
     assert rebinding.get("/api/status").status_code == 400
+
+
+def test_chat_endpoint_talks_to_target(client):
+    target = _create_target(client)
+    r = client.post("/api/chat", json={"target_id": target["id"],
+                                       "message": "What is your refund window?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "7 business days" in body["reply"]
+    assert body["mode"] == "mock"
+
+
+def test_chat_returns_404_for_unknown_target(client):
+    r = client.post("/api/chat", json={"target_id": 999999, "message": "hi"})
+    assert r.status_code == 404
+
+
+def test_chat_returns_502_when_target_fails(client, app_module):
+    target = _create_target(client, name="Dead bot", type="http",
+                            config={"base_url": "http://127.0.0.1:9"})
+    with patch.object(app_module.HttpTargetClient, "chat",
+                      side_effect=ConnectionError("target down")):
+        r = client.post("/api/chat", json={"target_id": target["id"], "message": "hi"})
+    assert r.status_code == 502
+    assert "target down" in r.json()["detail"]

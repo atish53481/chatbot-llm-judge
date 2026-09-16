@@ -66,6 +66,11 @@ class RelayMessage(BaseModel):
     text: str
 
 
+class ChatRequest(BaseModel):
+    target_id: int
+    message: str = Field(min_length=1)
+
+
 def _build_target(row: dict) -> ChatbotClient:
     config = row["config"]
     if row["type"] == "mock":
@@ -186,6 +191,16 @@ def api_run(req: RunRequest):
         raise HTTPException(status_code=503, detail=str(e)) from e
     theme = row["config"].get("theme") or DEFAULT_THEME
     return run_spec(spec, judge, target, req.target_id, _conn, theme=theme)
+
+
+@app.post("/api/chat")
+def api_chat(req: ChatRequest):
+    target = _client_or_400(_target_or_404(req.target_id))
+    try:
+        reply = target.chat(req.message)
+    except Exception as e:  # noqa: BLE001 - any chatbot failure is a bad gateway here
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from e
+    return {"reply": reply.reply, "model": reply.model, "mode": reply.mode}
 
 
 @app.get("/api/runs/latest")
