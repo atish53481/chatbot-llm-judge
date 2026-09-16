@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from backend import storage
 
 
@@ -39,3 +40,28 @@ def test_record_and_query_runs(tmp_path):
 
     hist = storage.history(conn, tid, "answer_relevancy")
     assert [r["score"] for r in hist] == [0.9, 0.4]
+
+
+def test_concurrent_access_on_shared_connection_is_safe(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    tid = storage.add_target(conn, "T1", "mock", {})
+    errors = []
+
+    def worker(n):
+        try:
+            for i in range(50):
+                storage.record_run(conn, tid, f"m{n}", i / 50, True, "2026-09-16T10:00:00Z")
+                storage.history(conn, tid, f"m{n}")
+                storage.latest_runs(conn, tid)
+                storage.list_targets(conn)
+        except Exception as e:  # noqa: BLE001 - any error means the lock failed
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(storage.history(conn, tid, "m0")) == 50

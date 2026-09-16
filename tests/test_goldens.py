@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -51,3 +52,21 @@ def test_delete_golden_removes_row(temp_goldens_file):
     assert g.delete_golden("g_0001") is True
     assert g.load_goldens() == []
     assert g.delete_golden("g_missing") is False
+
+
+def test_add_golden_leaves_no_temp_file(temp_goldens_file):
+    g.add_golden(theme="general_support", question="q", expected_answer="a")
+    assert not os.path.exists(str(temp_goldens_file) + ".tmp")
+
+
+def test_failed_write_keeps_existing_goldens(temp_goldens_file, monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(g.json, "dump", boom)
+        with pytest.raises(OSError):
+            g.add_golden(theme="general_support", question="q", expected_answer="a")
+
+    assert [r["id"] for r in g.load_goldens()] == ["g_0001"]
+    assert not os.path.exists(str(temp_goldens_file) + ".tmp")

@@ -1,7 +1,9 @@
 """JSON-backed golden dataset store — the 'golden rule' reference answers.
 
-Single-user, single-process tool: read-modify-write the whole file under a
-lock is enough, no database needed for this table.
+Single-user tool: read-modify-write the whole file under a lock. Reads take
+the lock too (FastAPI serves requests from several threads), and writes go
+to a temp file that then replaces the original, so a crash mid-write can
+never truncate the user's hand-written goldens.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ import threading
 import uuid
 
 GOLDENS_PATH = os.path.join(os.path.dirname(__file__), "goldens.json")
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 
 def _read_all() -> list[dict]:
@@ -20,12 +22,20 @@ def _read_all() -> list[dict]:
 
 
 def _write_all(rows: list[dict]) -> None:
-    with open(GOLDENS_PATH, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2)
+    tmp_path = GOLDENS_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, GOLDENS_PATH)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
 
 def load_goldens(theme: str | None = None) -> list[dict]:
-    rows = _read_all()
+    with _LOCK:
+        rows = _read_all()
     if theme is None:
         return rows
     return [r for r in rows if r["theme"] == theme]
