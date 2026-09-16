@@ -2,32 +2,29 @@
 
 The extension's content script types each question into the chatbot's own
 page and relays the reply it sees in the DOM. The backend never touches the
-page: it queues the question here and waits for the relayed answer.
+page: it queues the question here and waits for the relayed answer. Every
+question carries an id that the page echoes back with the reply, so a late
+answer to a question that already timed out is never scored as the answer to
+the next one.
 """
 from __future__ import annotations
 
 import queue as queue_module
 import threading
+import time
+import uuid
 
 from backend.targets.base import ChatbotClient, ChatReply
 
 DEFAULT_TIMEOUT = 60.0
 
 
-def _drain(box: "queue_module.Queue[str]") -> None:
-    while True:
-        try:
-            box.get_nowait()
-        except queue_module.Empty:
-            return
-
-
 class RelayQueue:
     """Per-session mailboxes: questions out to the page, replies back in."""
 
     def __init__(self):
-        self._questions: dict[str, "queue_module.Queue[str]"] = {}
-        self._replies: dict[str, "queue_module.Queue[str]"] = {}
+        self._questions: dict[str, "queue_module.Queue[tuple[str, str]]"] = {}
+        self._replies: dict[str, "queue_module.Queue[tuple[str, str]]"] = {}
         self._session_locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()
 
@@ -38,34 +35,50 @@ class RelayQueue:
             return boxes[session_id]
 
     def session_lock(self, session_id: str) -> threading.Lock:
-        """Serialises chats on one page so questions and answers cannot cross."""
+        """Serialises chats on one page so only one caller waits on it at a time."""
         return self._get(self._session_locks, session_id, threading.Lock)
 
     # Questions: backend -> page.
-    def ask(self, session_id: str, question: str) -> None:
-        self._get(self._questions, session_id, queue_module.Queue).put(question)
+    def ask(self, session_id: str, question: str) -> str:
+        question_id = uuid.uuid4().hex
+        self._get(self._questions, session_id, queue_module.Queue).put((question_id, question))
+        return question_id
 
-    def next_question(self, session_id: str) -> str | None:
+    def next_question(self, session_id: str) -> dict | None:
         try:
-            return self._get(self._questions, session_id, queue_module.Queue).get_nowait()
+            question_id, question = self._get(
+                self._questions, session_id, queue_module.Queue
+            ).get_nowait()
         except queue_module.Empty:
             return None
+        return {"id": question_id, "question": question}
 
     def withdraw_questions(self, session_id: str) -> None:
-        _drain(self._get(self._questions, session_id, queue_module.Queue))
+        box = self._get(self._questions, session_id, queue_module.Queue)
+        while True:
+            try:
+                box.get_nowait()
+            except queue_module.Empty:
+                return
 
     # Replies: page -> backend.
-    def push(self, session_id: str, text: str) -> None:
-        self._get(self._replies, session_id, queue_module.Queue).put(text)
+    def push(self, session_id: str, question_id: str, text: str) -> None:
+        self._get(self._replies, session_id, queue_module.Queue).put((question_id, text))
 
-    def pop(self, session_id: str, timeout: float) -> str | None:
-        try:
-            return self._get(self._replies, session_id, queue_module.Queue).get(timeout=timeout)
-        except queue_module.Empty:
-            return None
-
-    def drain_replies(self, session_id: str) -> None:
-        _drain(self._get(self._replies, session_id, queue_module.Queue))
+    def pop(self, session_id: str, question_id: str, timeout: float) -> str | None:
+        """Wait for the reply to one question; replies to other questions are stale and dropped."""
+        box = self._get(self._replies, session_id, queue_module.Queue)
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                reply_id, text = box.get(timeout=remaining)
+            except queue_module.Empty:
+                return None
+            if reply_id == question_id:
+                return text
 
 
 class DomRelayTargetClient(ChatbotClient):
@@ -79,11 +92,8 @@ class DomRelayTargetClient(ChatbotClient):
 
     def chat(self, message: str, history: list[dict] | None = None) -> ChatReply:
         with self.queue.session_lock(self.session_id):
-            # A reply that arrived before this question belongs to nobody;
-            # drop it so it cannot be scored as this question's answer.
-            self.queue.drain_replies(self.session_id)
-            self.queue.ask(self.session_id, message)
-            reply_text = self.queue.pop(self.session_id, timeout=self.timeout)
+            question_id = self.queue.ask(self.session_id, message)
+            reply_text = self.queue.pop(self.session_id, question_id, timeout=self.timeout)
             if reply_text is None:
                 self.queue.withdraw_questions(self.session_id)
                 raise TimeoutError(
