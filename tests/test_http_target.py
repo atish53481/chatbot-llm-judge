@@ -1,0 +1,43 @@
+from unittest.mock import patch, MagicMock
+
+from backend.targets.http_client import HttpTargetClient
+from backend.targets import presets
+
+
+def _fake_response(json_body, status=200):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.json.return_value = json_body
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+@patch("backend.targets.http_client.requests.post")
+def test_chat_extracts_reply_from_response_path(mock_post):
+    mock_post.return_value = _fake_response({"data": {"text": "hello there"}})
+    client = HttpTargetClient({
+        "base_url": "http://localhost:9999",
+        "chat_path": "/chat",
+        "message_field": "message",
+        "response_path": "data.text",
+    })
+    reply = client.chat("hi")
+    assert reply.reply == "hello there"
+    assert reply.mode == "http"
+    sent_payload = mock_post.call_args.kwargs["json"]
+    assert sent_payload == {"message": "hi"}
+
+
+@patch("backend.targets.http_client.requests.get")
+def test_health_hits_health_path(mock_get):
+    mock_get.return_value = _fake_response({"status": "ok"})
+    client = HttpTargetClient({"base_url": "http://localhost:9999"})
+    assert client.health() == {"status": "ok"}
+    mock_get.assert_called_once_with("http://localhost:9999/health", timeout=10)
+
+
+def test_openai_compatible_preset_shape():
+    config = presets.openai_compatible("http://localhost:8080", "sk-test")
+    client = HttpTargetClient(config)
+    assert client.headers["Authorization"] == "Bearer sk-test"
+    assert config["response_path"] == "choices.0.message.content"
