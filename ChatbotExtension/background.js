@@ -1,37 +1,34 @@
-// Background service worker for chatbot extension
+// Service worker: opens the side panel from the toolbar button, opens the
+// dashboard tab, and carries relay traffic for the content script (a page on
+// an https site may not call the http://127.0.0.1 backend itself).
+importScripts("lib/api.js");
 
-// Install handler - set defaults
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.set({
-    chatHistory: [],
-    settings: {
-      typingSpeed: 800,
-      botName: 'AI Assistant'
-    }
-  });
-  console.log('Chatbot extension installed');
-});
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((error) => console.error("LLM Judge: side panel setup failed", error));
 
-// Message handler for cross-component communication
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === 'GET_HISTORY') {
-    chrome.storage.local.get(['chatHistory'], (result) => {
-      sendResponse({ history: result.chatHistory || [] });
-    });
-    return true; // async response
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only this extension's own pages and content scripts may use these.
+  if (sender.id !== chrome.runtime.id) return false;
+
+  if (message.type === "OPEN_DASHBOARD") {
+    chrome.tabs.create({ url: chrome.runtime.getURL("dashboard/dashboard.html") });
+    return false;
   }
-
-  if (request.type === 'CLEAR_HISTORY') {
-    chrome.storage.local.set({ chatHistory: [] }, () => {
-      sendResponse({ success: true });
-    });
+  if (message.type === "RELAY_NEXT") {
+    api(`/api/relay/next?session_id=${encodeURIComponent(message.sessionId)}`)
+      .then((data) => sendResponse({ ok: true, id: data.id, question: data.question }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true; // keeps the channel open for the async reply
+  }
+  if (message.type === "RELAY_REPLY") {
+    api("/api/relay", {
+      method: "POST",
+      body: { session_id: message.sessionId, question_id: message.questionId, text: message.text },
+    })
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
-
-  if (request.type === 'GET_SETTINGS') {
-    chrome.storage.local.get(['settings'], (result) => {
-      sendResponse({ settings: result.settings || {} });
-    });
-    return true;
-  }
+  return false;
 });

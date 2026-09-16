@@ -1,59 +1,57 @@
-# Chrome Extension Chatbot for DeepEval Testing
+# LLM Judge — Chrome extension
 
-Sample chatbot Chrome extension for practicing LLM evaluation with DeepEval framework.
+Judge any chatbot's answers with DeepEval metrics from the Chrome side panel.
+The extension talks only to the local backend at `http://127.0.0.1:8000`.
 
-## Installation
+## Install
 
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable "Developer mode" (top right)
-3. Click "Load unpacked"
-4. Select the `ChatbotExtension` folder
+1. Start the backend from the project root: `run-backend.bat`
+   (first put `JUDGE_API_KEY=<your judge key>` in the project's `.env`).
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**
+   and pick this `ChatbotExtension` folder.
+3. Click the **LLM Judge** toolbar button. The side panel opens.
 
-## Features
+## Use
 
-- **Simple Q&A chatbot** with predefined responses
-- **Chat history** persisted in Chrome storage
-- **Typing indicator** for realistic interaction
-- **Responsive UI** with gradient header
-- **5 sample topics**: store hours, returns, discounts, payments, shipping
+- **Chatbot**: the side panel starts with a built-in *Sample chatbot* (a mock with
+  canned answers) so a first run needs no setup. *Add a chatbot* connects:
+  - an **OpenAI-compatible API** (base URL + API key + model),
+  - a **custom HTTP API** (chat path, message field, and the dotted path to the reply),
+  - a **chatbot web page** with no API: open the page in the current tab, save, then
+    click the page's message box, its Send button (or press Esc to send with Enter),
+    and the area where replies appear. The judge then types each golden question into
+    the page and reads the reply.
+- **Golden answers**: each chatbot uses a golden set (theme). Add or delete question /
+  expected-answer pairs (optional context lines and categories) in the side panel.
+- **Judge**: pick a metric (or *All metrics*) and press **Run judge**. The latest scores
+  chart updates in the side panel and in the dashboard.
+- **Dashboard** (*Open dashboard*): chat with the chatbot, see the latest score per
+  metric (bar, radar, or table), the trend across runs, and the last run case by case.
 
-## Testing with DeepEval
+## Manual smoke checklist
 
-Connect this chatbot to the evaluation system in `../evals/`:
+1. Backend running; side panel shows "Judge ready · <model>" (or the JUDGE_API_KEY hint,
+   with **Run judge** disabled and a tooltip).
+2. Chatbot list shows "Sample chatbot (sample)"; golden list shows 10 answers.
+3. Add a golden answer, see the count rise; delete it (two clicks), see it go.
+4. Run *Answer Relevancy*: a result line appears, then the latest-scores chart.
+5. Open the dashboard: the KPI tiles fill in; the chat answers "What is your refund
+   window?" with the 7-business-days policy; the case table lists 10 rows.
+6. Run the same metric again: the trend chart shows two points; Table views show the
+   same numbers.
+7. Switch the OS to dark mode: charts redraw with the dark palette.
+8. Stop the backend: both views show "Backend not reachable…"; start it again and the
+   side panel recovers within 10 seconds.
 
-1. Update `conftest.py` to query the extension's responses
-2. Run evaluation suite against predefined responses
-3. Test metrics: relevancy, faithfulness, hallucination detection
+## Security notes
 
-## File Structure
+- The backend accepts requests only from this extension's origin and only on
+  `127.0.0.1` / `localhost`.
+- API keys for connected chatbots are stored in the local `judge.db` and are never
+  sent back to the extension (responses show `***`).
+- Site access for a web-page chatbot is requested per site, only when you add one.
 
-```
-ChatbotExtension/
-├── manifest.json       # Extension configuration
-├── background.js       # Service worker for storage
-└── popup/
-    ├── popup.html      # Chat UI
-    └── popup.js        # Chat logic + responses
-```
+## Limits
 
-## Predefined Responses
-
-The chatbot responds to questions about:
-- **Store hours**: Mon-Fri 9-6, Sat 10-4, Sun closed
-- **Returns**: 30 days, unused, receipt required
-- **Student discount**: 15% off with valid ID
-- **Payment methods**: Visa, MC, Amex, Discover, PayPal, Apple Pay
-- **Shipping**: Standard 5-7 days, Express 2-3 days, Overnight 1 day
-
-## Usage
-
-1. Click extension icon in toolbar
-2. Type questions in chat input
-3. Press Enter or click Send
-4. Chat history persists across sessions
-
-## Integration with DeepEval
-
-Use this chatbot as the "application under test" for the evaluation system. The responses match the golden dataset in `evals/datasets/chatbot_golden.json`.
-
-See main README.md for full DeepEval setup instructions.
+- The web-page relay reads new text from the reply area you clicked. Pages that
+  re-render their whole history or stream very slowly may need a second try.

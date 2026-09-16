@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Judge</title>
+  <link rel="stylesheet" href="../lib/theme.css">
+  <link rel="stylesheet" href="sidebar.css">
+</head>
+<body>
+  <header class="panel-header">
+    <h1>LLM Judge</h1>
+    <p id="status" class="secondary" role="status">Checking backend…</p>
+  </header>
+
+  <section class="card" aria-labelledby="chatbot-heading">
+    <h2 id="chatbot-heading">Chatbot</h2>
+    <div class="row">
+      <label class="grow">
+        <span class="sr-only">Chatbot to judge</span>
+        <select id="target-select"></select>
+      </label>
+      <button id="delete-target" type="button" title="Delete this chatbot">Delete</button>
+    </div>
+    <p id="target-theme" class="muted small"></p>
+    <details id="add-target">
+      <summary>Add a chatbot</summary>
+      <form id="target-form" class="stack">
+        <label>Name <input id="target-name" required maxlength="80"></label>
+        <label>Connect via
+          <select id="target-type">
+            <option value="mock">Sample chatbot (built-in mock)</option>
+            <option value="openai">OpenAI-compatible API</option>
+            <option value="http">Custom HTTP API</option>
+            <option value="dom">Chatbot web page (no API)</option>
+          </select>
+        </label>
+        <div data-for="openai http" class="stack">
+          <label>Base URL <input id="target-base-url" type="url" placeholder="https://api.example.com"></label>
+          <label>API key <input id="target-api-key" type="password" autocomplete="off"></label>
+        </div>
+        <div data-for="openai" class="stack">
+          <label>Model <input id="target-model" value="gpt-4o-mini"></label>
+        </div>
+        <div data-for="http" class="stack">
+          <label>Chat path <input id="target-chat-path" value="/chat"></label>
+          <label>Message field <input id="target-message-field" value="message"></label>
+          <label>Reply path
+            <input id="target-response-path" value="reply" title="Dotted path to the reply text, e.g. data.answer or choices.0.message.content">
+          </label>
+        </div>
+        <p data-for="dom" class="muted small">
+          Open the chatbot's page in the current tab first. After saving, click the chatbot's
+          message box, then its Send button (or press Esc to send with Enter), then the area
+          where its replies appear.
+        </p>
+        <label>Golden set (theme)
+          <input id="target-theme-input" value="general_support" required pattern="[A-Za-z0-9_\-]+" title="Letters, digits, _ and -">
+        </label>
+        <div class="row">
+          <button type="submit" class="primary">Save chatbot</button>
+          <span id="target-form-error" class="status-error small" role="alert"></span>
+        </div>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="goldens-heading">
+    <h2 id="goldens-heading">Golden answers <span id="golden-count" class="muted"></span></h2>
+    <ul id="golden-list" class="golden-list"></ul>
+    <details id="add-golden">
+      <summary>Add a golden answer</summary>
+      <form id="golden-form" class="stack">
+        <label>Question <textarea id="golden-question" rows="2" required></textarea></label>
+        <label>Expected answer <textarea id="golden-answer" rows="3" required></textarea></label>
+        <label>Context (one fact per line, optional) <textarea id="golden-context" rows="3"></textarea></label>
+        <label>Categories (comma separated, optional) <input id="golden-categories"></label>
+        <div class="row">
+          <button type="submit" class="primary">Add golden answer</button>
+          <span id="golden-form-error" class="status-error small" role="alert"></span>
+        </div>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="judge-heading">
+    <h2 id="judge-heading">Judge</h2>
+    <div class="row">
+      <label class="grow">
+        <span class="sr-only">Metric</span>
+        <select id="metric-select"></select>
+      </label>
+      <button id="run-button" type="button" class="primary">Run judge</button>
+    </div>
+    <ul id="run-results" class="run-results" aria-live="polite"></ul>
+    <h3>Latest scores</h3>
+    <div id="latest-chart-box" class="chart-box hidden">
+      <canvas id="latest-chart" role="img" aria-label="Latest score per metric"></canvas>
+    </div>
+    <p id="latest-empty" class="muted small">No runs yet for this chatbot. Pick a metric and press Run judge.</p>
+  </section>
+
+  <button id="open-dashboard" type="button" class="wide">Open dashboard</button>
+
+  <script src="../lib/vendor/chart.umd.min.js"></script>
+  <script src="../lib/api.js"></script>
+  <script src="../lib/ui.js"></script>
+  <script src="../lib/charts.js"></script>
+  <script src="sidebar.js"></script>
+</body>
+</html>
