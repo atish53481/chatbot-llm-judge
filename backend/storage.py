@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 _LOCK = threading.RLock()
@@ -44,6 +45,18 @@ def init_db(path: str) -> sqlite3.Connection:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_target_metric ON runs (target_id, metric_key)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                theme TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT
+            )
+            """
         )
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.commit()
@@ -177,3 +190,51 @@ def history(conn: sqlite3.Connection, target_id: int, metric_key: str) -> list[d
             (target_id, metric_key),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def add_document(conn: sqlite3.Connection, theme: str, filename: str) -> int:
+    with _LOCK:
+        cur = conn.execute(
+            "INSERT INTO documents (theme, filename, uploaded_at, status, error) VALUES (?, ?, ?, ?, ?)",
+            (theme, filename, _now_iso(), "processing", None),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def set_document_status(
+    conn: sqlite3.Connection, document_id: int, status: str, error: str | None = None
+) -> None:
+    with _LOCK:
+        conn.execute(
+            "UPDATE documents SET status = ?, error = ? WHERE id = ?",
+            (status, error, document_id),
+        )
+        conn.commit()
+
+
+def get_document(conn: sqlite3.Connection, document_id: int) -> dict[str, Any] | None:
+    with _LOCK:
+        row = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+    return None if row is None else dict(row)
+
+
+def list_documents(conn: sqlite3.Connection, theme: str | None = None) -> list[dict[str, Any]]:
+    with _LOCK:
+        if theme is None:
+            rows = conn.execute("SELECT * FROM documents ORDER BY id DESC").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE theme = ? ORDER BY id DESC", (theme,)
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_document(conn: sqlite3.Connection, document_id: int) -> None:
+    with _LOCK:
+        conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        conn.commit()

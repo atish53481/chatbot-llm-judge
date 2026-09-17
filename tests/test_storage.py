@@ -91,3 +91,47 @@ def test_has_dom_session(tmp_path):
     assert storage.has_dom_session(conn, "shop.example")
     assert not storage.has_dom_session(conn, "api.example")
     assert not storage.has_dom_session(conn, "other.example")
+
+
+def test_documents_table_created(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    assert "documents" in tables
+
+
+def test_add_and_get_document(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    doc_id = storage.add_document(conn, "general_support", "policy.pdf")
+    row = storage.get_document(conn, doc_id)
+    assert row["theme"] == "general_support"
+    assert row["filename"] == "policy.pdf"
+    assert row["status"] == "processing"
+    assert row["error"] is None
+
+
+def test_set_document_status(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    doc_id = storage.add_document(conn, "t", "f.txt")
+    storage.set_document_status(conn, doc_id, "ready")
+    assert storage.get_document(conn, doc_id)["status"] == "ready"
+    storage.set_document_status(conn, doc_id, "error", "boom")
+    row = storage.get_document(conn, doc_id)
+    assert row["status"] == "error"
+    assert row["error"] == "boom"
+
+
+def test_list_documents_filters_by_theme(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    storage.add_document(conn, "a", "f1.txt")
+    storage.add_document(conn, "b", "f2.txt")
+    assert len(storage.list_documents(conn, "a")) == 1
+    assert len(storage.list_documents(conn)) == 2
+
+
+def test_delete_document(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    doc_id = storage.add_document(conn, "t", "f.txt")
+    storage.delete_document(conn, doc_id)
+    assert storage.get_document(conn, doc_id) is None
