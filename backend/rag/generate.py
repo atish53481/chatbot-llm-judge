@@ -18,7 +18,12 @@ def generate_goldens_from_document(path: str, theme: str, filename: str, judge) 
     the caller (the /api/documents endpoint) is responsible for catching it
     and recording a document status of "error"."""
     synthesizer = Synthesizer(model=judge)
-    config = ContextConstructionConfig(embedder=LocalSentenceEmbedder())
+    # critic_model must be set explicitly: ContextConstructionConfig resolves
+    # it in __post_init__ (construction time), before Synthesizer ever gets a
+    # chance to backfill a None with its own model — an unset critic_model
+    # otherwise silently tries to build a default OpenAI model and needs
+    # OPENAI_API_KEY, defeating the "reuse the judge, no second key" goal.
+    config = ContextConstructionConfig(embedder=LocalSentenceEmbedder(), critic_model=judge)
     generated = synthesizer.generate_goldens_from_docs(
         document_paths=[path],
         context_construction_config=config,
