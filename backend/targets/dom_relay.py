@@ -16,7 +16,7 @@ import uuid
 
 from backend.targets.base import ChatbotClient, ChatReply
 
-DEFAULT_TIMEOUT = 60.0
+DEFAULT_TIMEOUT = 120.0  # chatbots that stream long answers need time
 
 
 class RelayQueue:
@@ -34,6 +34,11 @@ class RelayQueue:
                 boxes[session_id] = factory()
             return boxes[session_id]
 
+    def _peek(self, boxes: dict, session_id: str):
+        # Read paths never create mailboxes for sessions nobody asked about.
+        with self._lock:
+            return boxes.get(session_id)
+
     def session_lock(self, session_id: str) -> threading.Lock:
         """Serialises chats on one page so only one caller waits on it at a time."""
         return self._get(self._session_locks, session_id, threading.Lock)
@@ -45,16 +50,28 @@ class RelayQueue:
         return question_id
 
     def next_question(self, session_id: str) -> dict | None:
+        box = self._peek(self._questions, session_id)
+        if box is None:
+            return None
         try:
-            question_id, question = self._get(
-                self._questions, session_id, queue_module.Queue
-            ).get_nowait()
+            question_id, question = box.get_nowait()
+        except queue_module.Empty:
+            return None
+        return {"id": question_id, "question": question}
+
+    def wait_question(self, session_id: str, timeout: float) -> dict | None:
+        """Long-poll for the next question. Callers check the session is known."""
+        box = self._get(self._questions, session_id, queue_module.Queue)
+        try:
+            question_id, question = box.get(timeout=timeout)
         except queue_module.Empty:
             return None
         return {"id": question_id, "question": question}
 
     def withdraw_questions(self, session_id: str) -> None:
-        box = self._get(self._questions, session_id, queue_module.Queue)
+        box = self._peek(self._questions, session_id)
+        if box is None:
+            return
         while True:
             try:
                 box.get_nowait()

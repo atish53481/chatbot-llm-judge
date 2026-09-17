@@ -6,6 +6,7 @@ __pycache__/
 .env
 node_modules/
 .superpowers/
+.commandcode/
 *.tmp
 .venv/
 *.stackdump

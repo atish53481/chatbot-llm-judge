@@ -1,0 +1,189 @@
+[
+  {
+    "id": "g_0001",
+    "theme": "general_support",
+    "question": "What is your refund window?",
+    "expected_answer": "Refunds are processed within 7 business days of receiving the returned item. Returns must be initiated within 30 days of delivery.",
+    "context": [
+      "Refunds are processed within 7 business days of receiving the returned item.",
+      "Items can be returned within 30 days of delivery in original condition."
+    ],
+    "categories": [
+      "policy",
+      "refund"
+    ]
+  },
+  {
+    "id": "g_0002",
+    "theme": "general_support",
+    "question": "How long does standard shipping take?",
+    "expected_answer": "Standard shipping is free on orders over $50 and takes 5-7 business days inside the US.",
+    "context": [
+      "Standard shipping (free on orders over $50): 5-7 business days inside the US."
+    ],
+    "categories": [
+      "policy",
+      "shipping"
+    ]
+  },
+  {
+    "id": "g_0003",
+    "theme": "general_support",
+    "question": "How do I reset my password?",
+    "expected_answer": "You can reset your password at example.com/account/reset.",
+    "context": [
+      "Reset password at example.com/account/reset."
+    ],
+    "categories": [
+      "account"
+    ]
+  },
+  {
+    "id": "g_0004",
+    "theme": "general_support",
+    "question": "Can I return underwear?",
+    "expected_answer": "No. Underwear is non-returnable, along with final sale and personalized items.",
+    "context": [
+      "Final sale items, personalized items, and underwear are non-returnable."
+    ],
+    "categories": [
+      "policy",
+      "return"
+    ]
+  },
+  {
+    "id": "g_0005",
+    "theme": "general_support",
+    "question": "What is express shipping?",
+    "expected_answer": "Express shipping costs $9.99 and arrives in 2-3 business days.",
+    "context": [
+      "Express shipping ($9.99): 2-3 business days."
+    ],
+    "categories": [
+      "policy",
+      "shipping"
+    ]
+  },
+  {
+    "id": "g_0006",
+    "theme": "general_support",
+    "question": "Can I pay with cryptocurrency?",
+    "expected_answer": "I don't have information about cryptocurrency payments. Please contact support@example.com.",
+    "context": [],
+    "categories": [
+      "out_of_scope"
+    ]
+  },
+  {
+    "id": "g_0007",
+    "theme": "general_support",
+    "question": "Where can I see my past orders?",
+    "expected_answer": "Your order history is available under \"My Orders\" after you sign in.",
+    "context": [
+      "Order history is available under \"My Orders\" after sign-in."
+    ],
+    "categories": [
+      "account"
+    ]
+  },
+  {
+    "id": "g_0008",
+    "theme": "general_support",
+    "question": "Who pays for return shipping?",
+    "expected_answer": "Return shipping is free for defective items; otherwise the buyer pays return shipping.",
+    "context": [
+      "Return shipping is free for defective items; otherwise the buyer pays return shipping."
+    ],
+    "categories": [
+      "policy",
+      "return"
+    ]
+  },
+  {
+    "id": "g_0009",
+    "theme": "general_support",
+    "question": "How will my refund be paid back to me?",
+    "expected_answer": "Refunds are issued to the original payment method.",
+    "context": [
+      "Refunds are issued to the original payment method."
+    ],
+    "categories": [
+      "policy",
+      "refund"
+    ]
+  },
+  {
+    "id": "g_0010",
+    "theme": "general_support",
+    "question": "How do I turn on two-factor authentication?",
+    "expected_answer": "Two-factor authentication can be enabled in your account settings.",
+    "context": [
+      "Two-factor auth can be enabled in account settings."
+    ],
+    "categories": [
+      "account"
+    ]
+  },
+  {
+    "id": "g_a919913e",
+    "theme": "legacy_store",
+    "question": "What are your store hours?",
+    "expected_answer": "We're open Monday through Friday 9 AM to 6 PM, and Saturday 10 AM to 4 PM. We're closed on Sundays.",
+    "context": [
+      "Store hours: Mon-Fri 9:00-18:00, Sat 10:00-16:00, Sun closed"
+    ],
+    "categories": [
+      "legacy"
+    ]
+  },
+  {
+    "id": "g_e602cb36",
+    "theme": "legacy_store",
+    "question": "How do I return a product?",
+    "expected_answer": "You can return any unused product within 30 days of purchase with the original receipt. Bring it to any store location or ship it back using our prepaid return label.",
+    "context": [
+      "Return policy: 30 days, unused condition, receipt required",
+      "Return methods: in-store or prepaid shipping label"
+    ],
+    "categories": [
+      "legacy"
+    ]
+  },
+  {
+    "id": "g_44d5cbbf",
+    "theme": "legacy_store",
+    "question": "Do you offer student discounts?",
+    "expected_answer": "Yes! Students get 15% off with a valid student ID. The discount applies to regular-priced items, excluding sale items.",
+    "context": [
+      "Student discount: 15% off with valid ID",
+      "Exclusions: sale items not eligible for student discount"
+    ],
+    "categories": [
+      "legacy"
+    ]
+  },
+  {
+    "id": "g_3dbdbc15",
+    "theme": "legacy_store",
+    "question": "What payment methods do you accept?",
+    "expected_answer": "We accept Visa, Mastercard, American Express, Discover, PayPal, and Apple Pay both online and in-store.",
+    "context": [
+      "Accepted payments: Visa, Mastercard, Amex, Discover, PayPal, Apple Pay"
+    ],
+    "categories": [
+      "legacy"
+    ]
+  },
+  {
+    "id": "g_c463192d",
+    "theme": "legacy_store",
+    "question": "How long does shipping take?",
+    "expected_answer": "Standard shipping takes 5-7 business days. Express shipping (2-3 days) and overnight options are also available at checkout.",
+    "context": [
+      "Shipping times: Standard 5-7 days, Express 2-3 days, Overnight 1 day"
+    ],
+    "categories": [
+      "legacy"
+    ]
+  }
+]

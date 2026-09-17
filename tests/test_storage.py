@@ -65,3 +65,29 @@ def test_concurrent_access_on_shared_connection_is_safe(tmp_path):
 
     assert errors == []
     assert len(storage.history(conn, tid, "m0")) == 50
+
+
+def test_sample_target_is_seeded_once(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    storage.seed_sample_target_once(conn)
+    targets = storage.list_targets(conn)
+    assert [(t["name"], t["type"]) for t in targets] == [("Sample chatbot", "mock")]
+    storage.delete_target(conn, targets[0]["id"])
+    storage.seed_sample_target_once(conn)
+    assert storage.list_targets(conn) == []  # a deleted sample stays deleted
+
+
+def test_seed_skips_databases_that_already_have_targets(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    storage.add_target(conn, "Mine", "mock", {})
+    storage.seed_sample_target_once(conn)
+    assert [t["name"] for t in storage.list_targets(conn)] == ["Mine"]
+
+
+def test_has_dom_session(tmp_path):
+    conn = storage.init_db(str(tmp_path / "test.db"))
+    storage.add_target(conn, "Web bot", "dom", {"session_id": "shop.example"})
+    storage.add_target(conn, "Api bot", "http", {"session_id": "api.example"})
+    assert storage.has_dom_session(conn, "shop.example")
+    assert not storage.has_dom_session(conn, "api.example")
+    assert not storage.has_dom_session(conn, "other.example")

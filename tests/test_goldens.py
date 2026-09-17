@@ -54,6 +54,31 @@ def test_delete_golden_removes_row(temp_goldens_file):
     assert g.delete_golden("g_missing") is False
 
 
+def test_update_golden_replaces_fields_and_keeps_id(temp_goldens_file):
+    updated = g.update_golden(
+        "g_0001",
+        theme="billing",
+        question="How long do refunds take?",
+        expected_answer="7 business days.",
+        context=["Refunds take 7 business days."],
+        categories=["policy"],
+    )
+    assert updated["id"] == "g_0001"
+    rows = g.load_goldens()
+    assert len(rows) == 1
+    assert rows[0]["theme"] == "billing"
+    assert rows[0]["question"] == "How long do refunds take?"
+    assert rows[0]["expected_answer"] == "7 business days."
+    assert rows[0]["context"] == ["Refunds take 7 business days."]
+    on_disk = json.loads(temp_goldens_file.read_text())
+    assert on_disk[0]["question"] == "How long do refunds take?"
+
+
+def test_update_missing_golden_returns_none(temp_goldens_file):
+    assert g.update_golden("g_missing", theme="t", question="q", expected_answer="a") is None
+    assert len(g.load_goldens()) == 1
+
+
 def test_add_golden_leaves_no_temp_file(temp_goldens_file):
     g.add_golden(theme="general_support", question="q", expected_answer="a")
     assert not os.path.exists(str(temp_goldens_file) + ".tmp")

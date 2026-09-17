@@ -7,11 +7,17 @@ chat window for the chatbot being judged.
 
 ## Quick start (Windows)
 
-1. Copy `.env.example` to `.env` and set `JUDGE_API_KEY` (a Groq key works with the defaults).
+1. Copy `.env.example` to `.env` and set `JUDGE_API_KEY` (a Groq key works with the
+   defaults; for a Command Code key also set
+   `JUDGE_BASE_URL=https://api.commandcode.ai/provider/v1`).
 2. Double-click `run-backend.bat`. The first start creates `.venv` and installs the
    packages (a few minutes); later starts take seconds. The backend listens on
    `http://127.0.0.1:8000`.
 3. Load the extension: see [ChatbotExtension/README.md](ChatbotExtension/README.md).
+
+The side panel starts with a built-in *Sample chatbot* (canned answers) so a first run
+needs no setup. To judge a real chatbot instead, use *Add a chatbot* and pick
+**Command Code** (paste an API key, pick a model) or another **OpenAI-compatible API**.
 
 ## Layout
 
@@ -41,12 +47,16 @@ Answer relevancy, faithfulness, hallucination, bias, toxicity, PII leakage and
 correctness (G-Eval). Every score is between 0 and 1, higher is better, and a metric
 passes at 0.7 or above.
 
+A **Run judge** sweep asks every golden question and scores the answers. To judge a
+single answer instead, chat with the chatbot in the dashboard and press **Judge this
+answer** on its reply — ad-hoc scores are not saved, so they never enter the trend.
+
 ## Golden answers
 
 Each chatbot is judged against one golden set (theme). `general_support` ships by
 default; `legacy_store` holds the answers migrated from the earlier `evals/` suite.
-Add or delete answers in the side panel. They are saved in
-`backend/datasets/goldens.json`; commit that file to version your baseline.
+Add, edit or delete answers in the side panel (each row has an **Edit** button). They
+are saved in `backend/datasets/goldens.json`; commit that file to version your baseline.
 
 ## Tests
 

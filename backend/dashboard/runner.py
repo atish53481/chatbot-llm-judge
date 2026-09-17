@@ -64,6 +64,62 @@ def run_spec(
     }
 
 
+def judge_one(
+    spec,
+    judge,
+    question: str,
+    actual_output: str,
+    expected_answer: str = "",
+    context: list[str] | None = None,
+) -> dict:
+    """Scores one answer collected by hand. Nothing is persisted.
+
+    The golden sweep reads its reference data from the dataset row; here it has
+    to be supplied, so a metric that cannot score without it reports an error
+    instead of quietly grading against an empty reference.
+    """
+    item = {
+        "question": question,
+        "expected_answer": expected_answer,
+        "context": context or [],
+    }
+    missing = [name for name in spec.needs if not item[name]]
+    if missing:
+        return _error(
+            spec,
+            "",
+            f"{spec.title} also needs {', '.join(missing)}: ask one of your golden "
+            f"questions, or add it to that golden answer.",
+            cases_total=1,
+        )
+
+    try:
+        metric = spec.build_metric(judge)
+        metric.measure(spec.build_case(item, actual_output))
+    except Exception as e:  # noqa: BLE001 - surface any judge failure to the caller
+        return _error(spec, "", f"{type(e).__name__}: {e}", cases_total=1)
+
+    passed = bool(metric.is_successful())
+    return {
+        "key": spec.key,
+        "theme": "",
+        "status": "pass" if passed else "fail",
+        "score": metric.score,
+        "threshold": spec.threshold,
+        "reason": metric.reason or "",
+        "rows": [{
+            "question": question,
+            "actual_output": actual_output,
+            "score": metric.score,
+            "passed": passed,
+            "reason": metric.reason or "",
+        }],
+        "cases_run": 1,
+        "cases_total": 1,
+        "error": None,
+    }
+
+
 def _error(spec, theme: str, message: str, cases_total: int) -> dict:
     return {
         "key": spec.key,

@@ -1,0 +1,75 @@
+name: CI
+
+# Runs the offline suite on every push to main and every pull request.
+# The live judge suite spends tokens, so it only runs when dispatched by hand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Offline test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # pytest.ini already disables the deepeval/opik/langsmith plugins and the
+      # live tests skip themselves without RUN_LIVE_JUDGE, so this costs no tokens.
+      - name: Run offline suite (no judge tokens)
+        env:
+          DEEPEVAL_TELEMETRY_OPT_OUT: "1"
+        run: python -m pytest -q
+
+  live:
+    name: Live judge metrics (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Require JUDGE_API_KEY
+        env:
+          JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
+        run: |
+          if [ -z "$JUDGE_API_KEY" ]; then
+            echo "::error::Add the JUDGE_API_KEY repository secret to run live metrics."
+            exit 1
+          fi
+
+      - name: Run live metrics (spends judge tokens)
+        env:
+          RUN_LIVE_JUDGE: "1"
+          JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
+          DEEPEVAL_TELEMETRY_OPT_OUT: "1"
+        run: python -m pytest -q -m live

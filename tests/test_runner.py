@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend import storage
-from backend.dashboard.runner import run_spec
+from backend.dashboard.runner import judge_one, run_spec
 from backend.targets.mock import MockTargetClient
 
 
@@ -23,7 +23,7 @@ def _fake_metric(scores, passes):
     return metric
 
 
-def _fake_spec(cases, metric, seen_themes=None):
+def _fake_spec(cases, metric, seen_themes=None, needs=()):
     def load(theme="general_support"):
         if seen_themes is not None:
             seen_themes.append(theme)
@@ -31,7 +31,9 @@ def _fake_spec(cases, metric, seen_themes=None):
 
     return SimpleNamespace(
         key="fake_metric",
+        title="Fake Metric",
         threshold=0.7,
+        needs=needs,
         cases=load,
         build_metric=lambda judge: metric,
         build_case=lambda g, reply: SimpleNamespace(input=g["question"], actual_output=reply),
@@ -110,6 +112,57 @@ def test_run_spec_reports_error_on_target_exception_and_records_nothing(tmp_path
     assert "unreachable" in result["error"]
     assert result["cases_total"] == 1
     assert storage.history(conn, target_id, "fake_metric") == []
+
+
+def test_judge_one_scores_a_single_answer():
+    spec = _fake_spec([], _fake_metric([0.42], [False]))
+    result = judge_one(spec, judge=object(), question="What is your refund window?",
+                       actual_output="Refunds within 7 business days.")
+
+    assert result["status"] == "fail"
+    assert result["score"] == 0.42
+    assert result["cases_run"] == 1
+    assert result["error"] is None
+    assert result["rows"] == [{
+        "question": "What is your refund window?",
+        "actual_output": "Refunds within 7 business days.",
+        "score": 0.42,
+        "passed": False,
+        "reason": "reason 0",
+    }]
+
+
+def test_judge_one_reports_a_missing_required_input():
+    spec = _fake_spec([], _fake_metric([], []), needs=("expected_answer",))
+    result = judge_one(spec, judge=object(), question="q", actual_output="a")
+
+    assert result["status"] == "error"
+    assert "expected_answer" in result["error"]
+    assert result["cases_run"] == 0
+    assert "score" in result and result["score"] is None
+
+
+def test_judge_one_hands_reference_data_to_the_case():
+    seen = {}
+    spec = _fake_spec([], _fake_metric([1.0], [True]), needs=("context", "expected_answer"))
+    spec.build_case = lambda g, reply: seen.update(g) or SimpleNamespace()
+
+    judge_one(spec, judge=object(), question="q", actual_output="a",
+              expected_answer="the golden answer", context=["a fact"])
+
+    assert seen["question"] == "q"
+    assert seen["expected_answer"] == "the golden answer"
+    assert seen["context"] == ["a fact"]
+
+
+def test_judge_one_reports_a_judge_failure():
+    spec = _fake_spec([], _fake_metric([], []))
+    spec.build_metric = MagicMock(side_effect=RuntimeError("judge exploded"))
+
+    result = judge_one(spec, judge=object(), question="q", actual_output="a")
+
+    assert result["status"] == "error"
+    assert "judge exploded" in result["error"]
 
 
 def test_run_spec_reports_error_when_dataset_fails_to_load(tmp_path):

@@ -10,6 +10,7 @@ const state = {
   judgeUp: false,
   activeTab: null,
   chart: null,
+  editingGolden: null,
 };
 
 function currentTarget() {
@@ -66,8 +67,33 @@ async function onTargetChanged() {
   $("target-theme").textContent = target ? `Golden set: ${themeOf(target)}` : "";
   $("delete-target").disabled = !target;
   $("run-results").replaceChildren();
+  // Goldens belong to the target's theme, so drop any half-finished edit.
+  resetGoldenForm();
   updateRunButton();
   await Promise.all([loadGoldens(), renderLatest()]);
+}
+
+// The golden form doubles as the editor; resetGoldenForm returns it to "add".
+function resetGoldenForm() {
+  state.editingGolden = null;
+  $("golden-form").reset();
+  $("golden-submit").textContent = "Add golden answer";
+  $("golden-cancel").classList.add("hidden");
+  $("golden-form-summary").textContent = "Add a golden answer";
+}
+
+function startEditGolden(golden) {
+  state.editingGolden = golden.id;
+  $("golden-question").value = golden.question;
+  $("golden-answer").value = golden.expected_answer;
+  $("golden-context").value = (golden.context || []).join("\n");
+  $("golden-categories").value = (golden.categories || []).join(", ");
+  $("golden-submit").textContent = "Save changes";
+  $("golden-cancel").classList.remove("hidden");
+  $("golden-form-summary").textContent = "Edit golden answer";
+  $("golden-form-error").textContent = "";
+  $("add-golden").open = true;
+  $("golden-question").focus();
 }
 
 async function loadGoldens() {
@@ -102,12 +128,18 @@ async function loadGoldens() {
           el("div", { className: "question" }, golden.question),
           el("div", { className: "answer" }, golden.expected_answer),
         ),
+        el("button", {
+          type: "button",
+          "aria-label": `Edit golden answer: ${golden.question}`,
+          onclick: () => startEditGolden(golden),
+        }, "Edit"),
         confirmButton("Delete", `Delete golden answer: ${golden.question}`, async () => {
           try {
             await api(`/api/goldens/${encodeURIComponent(golden.id)}`, { method: "DELETE" });
           } catch (error) {
             $("golden-form-error").textContent = error.message;
           }
+          if (state.editingGolden === golden.id) resetGoldenForm();
           await loadGoldens();
         }),
       ),
@@ -146,10 +178,25 @@ function syncTargetForm() {
   }
 }
 
+// Each provider suggests its own model id; follow it when the user switches
+// providers. They can still type any model id they like afterwards.
+function applySuggestedModel() {
+  const option = $("target-type").selectedOptions[0];
+  if (option && option.dataset.model) $("target-model").value = option.dataset.model;
+}
+
 function buildTargetBody(type, name, theme) {
   const value = (id) => $(id).value.trim();
   if (type === "mock") {
     return { name, type: "mock", config: { theme } };
+  }
+  if (type === "commandcode") {
+    const apiKey = value("target-api-key");
+    if (!apiKey) throw new Error("API key is required for Command Code.");
+    const config = { api_key: apiKey, theme };
+    const model = value("target-model");
+    if (model) config.model = model;
+    return { name, type: "http", preset: "commandcode", config };
   }
   const baseUrl = value("target-base-url");
   if (!baseUrl) throw new Error("Base URL is required.");
@@ -242,22 +289,32 @@ $("golden-form").addEventListener("submit", async (event) => {
   if (!target) return;
   const context = $("golden-context").value.split("\n").map((s) => s.trim()).filter(Boolean);
   const categories = $("golden-categories").value.split(",").map((s) => s.trim()).filter(Boolean);
+  const editing = state.editingGolden;
+  const body = {
+    theme: themeOf(target),
+    question: $("golden-question").value.trim(),
+    expected_answer: $("golden-answer").value.trim(),
+    context,
+    categories,
+  };
   try {
-    await api("/api/goldens", {
-      method: "POST",
-      body: {
-        theme: themeOf(target),
-        question: $("golden-question").value.trim(),
-        expected_answer: $("golden-answer").value.trim(),
-        context,
-        categories,
-      },
-    });
-    $("golden-form").reset();
+    if (editing) {
+      await api(`/api/goldens/${encodeURIComponent(editing)}`, { method: "PUT", body });
+    } else {
+      await api("/api/goldens", { method: "POST", body });
+    }
+    resetGoldenForm();
+    $("add-golden").open = false;
     await loadGoldens();
   } catch (error) {
     $("golden-form-error").textContent = error.message;
   }
+});
+
+$("golden-cancel").addEventListener("click", () => {
+  resetGoldenForm();
+  $("golden-form-error").textContent = "";
+  $("add-golden").open = false;
 });
 
 armConfirm($("delete-target"), async () => {
@@ -311,7 +368,10 @@ $("target-select").addEventListener("change", () => {
   });
 });
 $("metric-select").addEventListener("change", () => settings.set("selectedMetric", $("metric-select").value));
-$("target-type").addEventListener("change", syncTargetForm);
+$("target-type").addEventListener("change", () => {
+  applySuggestedModel();
+  syncTargetForm();
+});
 $("open-dashboard").addEventListener("click", () => chrome.runtime.sendMessage({ type: "OPEN_DASHBOARD" }));
 chrome.tabs.onActivated.addListener(() => trackActiveTab());
 chrome.tabs.onUpdated.addListener((_tabId, _info, tab) => {

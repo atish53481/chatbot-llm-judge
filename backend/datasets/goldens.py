@@ -63,6 +63,31 @@ def add_golden(
         return new_row
 
 
+def update_golden(
+    golden_id: str,
+    theme: str,
+    question: str,
+    expected_answer: str,
+    context: list[str] | None = None,
+    categories: list[str] | None = None,
+) -> dict | None:
+    """Replaces one row's fields in place, keeping its id. None when unknown."""
+    with _LOCK:
+        rows = _read_all()
+        for row in rows:
+            if row["id"] == golden_id:
+                row.update({
+                    "theme": theme,
+                    "question": question,
+                    "expected_answer": expected_answer,
+                    "context": context or [],
+                    "categories": categories or [],
+                })
+                _write_all(rows)
+                return dict(row)
+        return None
+
+
 def delete_golden(golden_id: str) -> bool:
     with _LOCK:
         rows = _read_all()

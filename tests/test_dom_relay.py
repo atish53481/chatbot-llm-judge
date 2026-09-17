@@ -130,3 +130,23 @@ def test_late_reply_to_timed_out_question_is_not_used_for_the_next_one():
 
 def test_health_is_ok():
     assert DomRelayTargetClient("s3", RelayQueue()).health() == {"status": "ok"}
+
+
+def test_reading_an_unknown_session_creates_no_mailbox():
+    q = RelayQueue()
+    assert q.next_question("never-seen") is None
+    q.withdraw_questions("never-seen")
+    assert "never-seen" not in q._questions
+
+
+def test_wait_question_returns_a_question_asked_while_waiting():
+    q = RelayQueue()
+    timer = threading.Timer(0.1, lambda: q.ask("s5", "late question"))
+    timer.start()
+    got = q.wait_question("s5", timeout=5)
+    timer.join()
+    assert got["question"] == "late question"
+
+
+def test_wait_question_times_out_with_none():
+    assert RelayQueue().wait_question("s6", timeout=0.2) is None

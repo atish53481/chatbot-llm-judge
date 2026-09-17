@@ -30,16 +30,19 @@
         <label>Connect via
           <select id="target-type">
             <option value="mock">Sample chatbot (built-in mock)</option>
-            <option value="openai">OpenAI-compatible API</option>
+            <option value="commandcode" data-model="z-ai/glm-5.3-flash">Command Code (real model)</option>
+            <option value="openai" data-model="gpt-4o-mini">OpenAI-compatible API</option>
             <option value="http">Custom HTTP API</option>
             <option value="dom">Chatbot web page (no API)</option>
           </select>
         </label>
         <div data-for="openai http" class="stack">
           <label>Base URL <input id="target-base-url" type="url" placeholder="https://api.example.com"></label>
+        </div>
+        <div data-for="commandcode openai http" class="stack">
           <label>API key <input id="target-api-key" type="password" autocomplete="off"></label>
         </div>
-        <div data-for="openai" class="stack">
+        <div data-for="commandcode openai" class="stack">
           <label>Model <input id="target-model" value="gpt-4o-mini"></label>
         </div>
         <div data-for="http" class="stack">
@@ -69,14 +72,15 @@
     <h2 id="goldens-heading">Golden answers <span id="golden-count" class="muted"></span></h2>
     <ul id="golden-list" class="golden-list"></ul>
     <details id="add-golden">
-      <summary>Add a golden answer</summary>
+      <summary id="golden-form-summary">Add a golden answer</summary>
       <form id="golden-form" class="stack">
         <label>Question <textarea id="golden-question" rows="2" required></textarea></label>
         <label>Expected answer <textarea id="golden-answer" rows="3" required></textarea></label>
         <label>Context (one fact per line, optional) <textarea id="golden-context" rows="3"></textarea></label>
         <label>Categories (comma separated, optional) <input id="golden-categories"></label>
         <div class="row">
-          <button type="submit" class="primary">Add golden answer</button>
+          <button type="submit" id="golden-submit" class="primary">Add golden answer</button>
+          <button type="button" id="golden-cancel" class="hidden">Cancel</button>
           <span id="golden-form-error" class="status-error small" role="alert"></span>
         </div>
       </form>

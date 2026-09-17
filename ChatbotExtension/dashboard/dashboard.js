@@ -11,6 +11,7 @@ const state = {
   trendView: "chart",
   latestChart: null,
   trendChart: null,
+  history: [],
 };
 
 function currentTarget() {
@@ -43,12 +44,68 @@ async function refreshJudge() {
   updateRunButton();
 }
 
-function appendBubble(kind, text, meta) {
+function appendBubble(kind, text, meta, judgeTarget) {
   const log = $("chat-log");
   log.append(
-    el("div", { className: `bubble ${kind}` }, text, meta ? el("span", { className: "meta" }, meta) : null),
+    el(
+      "div",
+      { className: `bubble ${kind}` },
+      text,
+      meta ? el("span", { className: "meta" }, meta) : null,
+      judgeTarget
+        ? el(
+            "button",
+            {
+              type: "button",
+              className: "judge-answer",
+              onclick: () => judgeAnswer(judgeTarget.question, judgeTarget.actual_output),
+            },
+            "Judge this answer",
+          )
+        : null,
+    ),
   );
   log.scrollTop = log.scrollHeight;
+}
+
+// Ad-hoc judging: score the answer on screen, using the selected metric(s).
+// Nothing is recorded, so the trend charts stay a record of golden-set runs.
+async function judgeAnswer(question, actualOutput) {
+  const target = currentTarget();
+  if (!target) return;
+  const choice = $("metric-select").value;
+  const keys = choice === ALL_METRICS ? state.metrics.map((m) => m.key) : [choice];
+  const titles = new Map(state.metrics.map((m) => [m.key, m.title]));
+  setStatus(`Judging this answer with ${keys.length} metric${keys.length > 1 ? "s" : ""}…`);
+  for (const key of keys) {
+    const title = titles.get(key) || key;
+    let result;
+    try {
+      result = await api("/api/judge", {
+        method: "POST",
+        body: {
+          metric_key: key,
+          question,
+          actual_output: actualOutput,
+          theme: themeOf(target),
+        },
+      });
+    } catch (error) {
+      appendBubble("error", `${title}: ${error.message}`);
+      continue;
+    }
+    if (result.status === "error") {
+      appendBubble("error", `${title}: ${result.error}`);
+    } else {
+      const icon = result.status === "pass" ? "✓" : "✕";
+      appendBubble(
+        "note",
+        `${icon} ${title}: ${formatScore(result.score)} / ${formatScore(result.threshold)}`,
+        result.reason || null,
+      );
+    }
+  }
+  setStatus("Judged that answer. These scores are not saved to the trend.");
 }
 
 async function loadTargets(preferredId) {
@@ -67,6 +124,8 @@ async function onTargetChanged() {
   const target = currentTarget();
   await settings.set("selectedTargetId", target ? target.id : null);
   $("chat-log").replaceChildren();
+  // A real chatbot keeps its context per conversation; a new target starts fresh.
+  state.history = [];
   if (target) appendBubble("note", `Chatting with ${target.name}. Golden set: ${themeOf(target)}.`);
   updateRunButton();
   renderCases(await settings.get("lastRun", null));
@@ -255,10 +314,14 @@ $("chat-form").addEventListener("submit", async (event) => {
   try {
     const reply = await api("/api/chat", {
       method: "POST",
-      body: { target_id: target.id, message },
+      body: { target_id: target.id, message, history: state.history.slice(-40) },
     });
     const model = reply.model && reply.model !== "unknown" ? ` · ${reply.model}` : "";
-    appendBubble("bot", reply.reply, `${target.name} · ${reply.mode}${model}`);
+    appendBubble("bot", reply.reply, `${target.name} · ${reply.mode}${model}`, {
+      question: message,
+      actual_output: reply.reply,
+    });
+    state.history.push({ role: "user", content: message }, { role: "assistant", content: reply.reply });
   } catch (error) {
     appendBubble("error", error.message);
   } finally {

@@ -189,6 +189,13 @@ body {
   color: var(--text-muted);
 }
 
+.bubble .judge-answer {
+  margin-top: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .chat-form {
   display: flex;
   gap: 8px;

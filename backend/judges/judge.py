@@ -4,6 +4,7 @@ Ported from the AITesterBlueprint3x reference framework's llm_providers/judge.py
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 import threading
@@ -51,7 +52,8 @@ class GroqJudge(LocalModel):
         return self._call(super().generate, *args, **kwargs)
 
     async def a_generate(self, *args, **kwargs):
-        return await super().a_generate(*args, **kwargs)
+        # Same lock and rate-limit backoff as the sync path.
+        return await asyncio.to_thread(self.generate, *args, **kwargs)
 
 
 def build_judge() -> GroqJudge:

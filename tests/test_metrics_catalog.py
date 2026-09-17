@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 
@@ -5,7 +6,7 @@ import pytest
 
 from backend.datasets import goldens
 from backend.judges import judge
-from backend.metrics_catalog import ALL_SPECS, SPECS_BY_KEY
+from backend.metrics_catalog import ALL_SPECS, PASS_THRESHOLD, SPECS_BY_KEY
 
 
 def test_all_specs_have_unique_keys():
@@ -101,3 +102,13 @@ def test_every_spec_builds_its_metric(monkeypatch, spec):
     judge_instance = judge.build_judge()
     metric = spec.build_metric(judge_instance)
     assert metric.threshold == spec.threshold
+
+
+def test_unknown_dataset_name_raises():
+    spec = dataclasses.replace(SPECS_BY_KEY["answer_relevancy"], dataset_name="nope")
+    with pytest.raises(ValueError, match="nope"):
+        spec.cases()
+
+
+def test_all_specs_share_the_pass_threshold():
+    assert {s.threshold for s in ALL_SPECS} == {PASS_THRESHOLD}

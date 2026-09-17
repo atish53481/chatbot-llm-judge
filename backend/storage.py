@@ -1,4 +1,4 @@
-"""SQLite persistence for targets and judge run history.
+"""SQLite persistence for targets, judge run history and one-time setup flags.
 
 FastAPI serves requests from a thread pool and all of them share one
 connection, so every function holds the module lock: a sqlite3 connection
@@ -12,6 +12,8 @@ import threading
 from typing import Any
 
 _LOCK = threading.RLock()
+
+SAMPLE_TARGET = ("Sample chatbot", "mock", {"theme": "general_support"})
 
 
 def init_db(path: str) -> sqlite3.Connection:
@@ -43,8 +45,35 @@ def init_db(path: str) -> sqlite3.Connection:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_target_metric ON runs (target_id, metric_key)"
         )
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.commit()
     return conn
+
+
+def seed_sample_target_once(conn: sqlite3.Connection) -> None:
+    """Adds the sample chatbot to a brand-new database, and never again.
+
+    The seed is remembered in meta, so a user who deletes the sample does
+    not get it back on the next start.
+    """
+    with _LOCK:
+        if conn.execute("SELECT 1 FROM meta WHERE key = 'sample_seeded'").fetchone():
+            return
+        if conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 0:
+            name, type_, config = SAMPLE_TARGET
+            conn.execute(
+                "INSERT INTO targets (name, type, config_json) VALUES (?, ?, ?)",
+                (name, type_, json.dumps(config)),
+            )
+        conn.execute("INSERT INTO meta (key, value) VALUES ('sample_seeded', '1')")
+        conn.commit()
+
+
+def has_dom_session(conn: sqlite3.Connection, session_id: str) -> bool:
+    """True when a web-page chatbot relays through the page host session_id."""
+    with _LOCK:
+        rows = conn.execute("SELECT config_json FROM targets WHERE type = 'dom'").fetchall()
+    return any(json.loads(r["config_json"]).get("session_id") == session_id for r in rows)
 
 
 def _target_row(row: sqlite3.Row) -> dict[str, Any]:
