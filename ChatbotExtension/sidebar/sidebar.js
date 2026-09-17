@@ -76,7 +76,7 @@ async function onTargetChanged() {
   // before; the selection just changed, so that edit no longer applies.
   resetTargetForm();
   updateRunButton();
-  await Promise.all([loadGoldens(), renderLatest()]);
+  await Promise.all([loadGoldens(), renderLatest(), loadDocuments()]);
 }
 
 // The target form doubles as the editor; resetTargetForm returns it to "add".
@@ -140,6 +140,31 @@ function startEditGolden(golden) {
   $("golden-form-error").textContent = "";
   $("add-golden").open = true;
   $("golden-question").focus();
+}
+
+function documentRow(doc) {
+  const icon = doc.status === "ready" ? "✓" : doc.status === "error" ? "!" : "…";
+  return el(
+    "li",
+    { className: `document-row status-${doc.status}` },
+    el("span", {}, `${icon} ${doc.filename}`),
+    doc.status === "error" ? el("span", { className: "status-error small" }, doc.error) : null,
+    confirmButton("Delete", `Delete document: ${doc.filename}`, async () => {
+      await api(`/api/documents/${doc.id}`, { method: "DELETE" });
+      await loadDocuments();
+    }),
+  );
+}
+
+async function loadDocuments() {
+  const target = currentTarget();
+  const list = $("document-list");
+  if (!target) {
+    list.replaceChildren();
+    return;
+  }
+  const docs = await api(`/api/documents?theme=${encodeURIComponent(themeOf(target))}`);
+  list.replaceChildren(...docs.map(documentRow));
 }
 
 async function loadGoldens() {
@@ -369,6 +394,38 @@ $("golden-form").addEventListener("submit", async (event) => {
     await loadGoldens();
   } catch (error) {
     $("golden-form-error").textContent = error.message;
+  }
+});
+
+$("document-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("document-form-error").textContent = "";
+  const target = currentTarget();
+  if (!target) return;
+  const fileInput = $("document-file");
+  const file = fileInput.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append("theme", themeOf(target));
+  formData.append("file", file);
+  $("document-submit").disabled = true;
+  $("document-submit").textContent = "Generating… (real LLM calls, can take a while)";
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/documents`, { method: "POST", body: formData });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || "Upload failed.");
+    if (result.status === "error") {
+      $("document-form-error").textContent = result.error;
+    } else {
+      fileInput.value = "";
+      await loadGoldens();
+    }
+    await loadDocuments();
+  } catch (error) {
+    $("document-form-error").textContent = error.message;
+  } finally {
+    $("document-submit").disabled = false;
+    $("document-submit").textContent = "Generate goldens";
   }
 });
 

@@ -91,6 +91,22 @@
     </details>
   </section>
 
+  <section class="card" aria-labelledby="documents-heading">
+    <h2 id="documents-heading">Generate from a document</h2>
+    <p class="muted small">
+      Upload a reference or requirement document (PDF, TXT, DOCX, MD) and DeepEval
+      generates a golden set from it into the golden answers above.
+    </p>
+    <form id="document-form" class="stack">
+      <input id="document-file" type="file" accept=".pdf,.txt,.docx,.md,.markdown,.mdx" required>
+      <div class="row">
+        <button type="submit" id="document-submit" class="primary">Generate goldens</button>
+        <span id="document-form-error" class="status-error small" role="alert"></span>
+      </div>
+    </form>
+    <ul id="document-list" class="document-list"></ul>
+  </section>
+
   <section class="card" aria-labelledby="judge-heading">
     <h2 id="judge-heading">Judge</h2>
     <div class="row">

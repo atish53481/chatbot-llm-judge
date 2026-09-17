@@ -185,3 +185,23 @@ summary {
 .wide {
   width: 100%;
 }
+
+.document-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.document-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--grid);
+}
+
+.document-row span:first-child {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
