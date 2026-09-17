@@ -80,10 +80,15 @@ const scoreLabels = {
       const row = rows[i];
       if (!row) return;
       const x = bar.x + 6;
+      const text = `${formatScore(row.score)} ${row.passed ? "pass" : "fail"}`;
+      // A surface-colored plate keeps the label readable where the dashed
+      // threshold line crosses it.
+      ctx.fillStyle = options.surfaceColor;
+      ctx.fillRect(x - 3, bar.y - 9, 20 + ctx.measureText(text).width, 18);
       ctx.fillStyle = row.passed ? options.goodColor : options.criticalColor;
       ctx.fillText(row.passed ? "✓" : "✕", x, bar.y);
       ctx.fillStyle = options.textColor;
-      ctx.fillText(`${formatScore(row.score)} ${row.passed ? "pass" : "fail"}`, x + 14, bar.y);
+      ctx.fillText(text, x + 14, bar.y);
     });
     ctx.restore();
   },
@@ -145,7 +150,7 @@ function latestChartConfig(rows, catalog, kind) {
       r: {
         min: 0,
         max: 1,
-        ticks: { stepSize: 0.2, color: ink.muted, backdropColor: "transparent" },
+        ticks: { stepSize: 0.2, color: ink.muted, backdropColor: ink.surface, backdropPadding: 2 },
         grid: { color: ink.grid },
         angleLines: { color: ink.grid },
         pointLabels: { color: ink.secondary },
@@ -183,6 +188,7 @@ function latestChartConfig(rows, catalog, kind) {
   options.plugins.tooltip.callbacks = { label: tooltipLabel };
   options.plugins.scoreLabels = {
     rows: ordered,
+    surfaceColor: ink.surface,
     textColor: ink.secondary,
     goodColor: cssVar("--status-good"),
     criticalColor: cssVar("--status-critical"),
@@ -239,6 +245,7 @@ function trendChartConfig(historyByMetric, catalog) {
       borderColor: color,
       backgroundColor: single ? withAlpha(color, 0.1) : color,
       fill: single ? "origin" : false,
+      clip: 6, // keeps markers at a score of 1.0 whole at the top edge
       borderWidth: 2,
       borderCapStyle: "round",
       borderJoinStyle: "round",
