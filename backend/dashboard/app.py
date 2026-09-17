@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
@@ -15,6 +17,7 @@ from backend.dashboard.runner import judge_one, run_spec
 from backend.datasets import goldens as goldens_store
 from backend.judges.judge import build_judge, judge_name
 from backend.metrics_catalog import ALL_SPECS, DEFAULT_THEME, SPECS_BY_KEY
+from backend.rag.generate import generate_goldens_from_document
 from backend.targets import presets
 from backend.targets.base import ChatbotClient
 from backend.targets.dom_relay import DomRelayTargetClient, RelayQueue
@@ -23,6 +26,8 @@ from backend.targets.mock import MockTargetClient
 
 DB_PATH = os.getenv("JUDGE_DB_PATH", "judge.db")
 TARGET_TYPES = ("mock", "http", "dom")
+SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".txt", ".docx", ".md", ".markdown", ".mdx"}
+DOCUMENTS_DIR = Path(__file__).resolve().parent.parent / "datasets" / "documents"
 PRESETS = {
     "openai_compatible": presets.openai_compatible,
     "commandcode": presets.commandcode,
@@ -208,6 +213,48 @@ def api_clear_target_runs(target_id: int):
     _target_or_404(target_id)
     cleared = storage.clear_runs(_conn, target_id)
     return {"target_id": target_id, "cleared": cleared}
+
+
+@app.post("/api/documents")
+def api_upload_document(theme: str = Form(...), file: UploadFile = File(...)):
+    try:
+        judge = build_judge()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    safe_filename = Path(file.filename or "document").name
+    extension = Path(safe_filename).suffix.lower()
+    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported file type {extension!r}: supported types are "
+            f"{', '.join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))}",
+        )
+    document_id = storage.add_document(_conn, theme, safe_filename)
+    theme_dir = DOCUMENTS_DIR / theme
+    theme_dir.mkdir(parents=True, exist_ok=True)
+    dest = theme_dir / f"{document_id}_{safe_filename}"
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    try:
+        created = generate_goldens_from_document(str(dest), theme, safe_filename, judge)
+        storage.set_document_status(_conn, document_id, "ready")
+    except Exception as e:  # noqa: BLE001 - any generation failure is reported, not a 500
+        storage.set_document_status(_conn, document_id, "error", f"{type(e).__name__}: {e}")
+        return {**storage.get_document(_conn, document_id), "goldens_created": 0}
+    return {**storage.get_document(_conn, document_id), "goldens_created": created}
+
+
+@app.get("/api/documents")
+def api_list_documents(theme: str | None = None):
+    return storage.list_documents(_conn, theme)
+
+
+@app.delete("/api/documents/{document_id}")
+def api_delete_document(document_id: int):
+    if storage.get_document(_conn, document_id) is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    storage.delete_document(_conn, document_id)
+    return {"deleted": document_id}
 
 
 @app.get("/api/goldens")

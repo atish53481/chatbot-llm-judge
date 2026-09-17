@@ -450,3 +450,57 @@ def test_extension_origin_can_be_pinned(app_module):
     pinned = app_module.extension_origin_regex("abcdefghijklmnopabcdefghijklmnop")
     assert re.fullmatch(pinned, "chrome-extension://abcdefghijklmnopabcdefghijklmnop")
     assert not re.fullmatch(pinned, "chrome-extension://" + "b" * 32)
+
+
+def test_upload_document_creates_goldens(app_module, client):
+    with patch.object(app_module, "generate_goldens_from_document", return_value=3) as mock_gen:
+        response = client.post(
+            "/api/documents",
+            data={"theme": "general_support"},
+            files={"file": ("policy.txt", b"Refunds within 7 days.", "text/plain")},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["goldens_created"] == 3
+    assert body["status"] == "ready"
+    assert body["filename"] == "policy.txt"
+    mock_gen.assert_called_once()
+
+
+def test_upload_document_rejects_unsupported_extension(app_module, client):
+    response = client.post(
+        "/api/documents",
+        data={"theme": "general_support"},
+        files={"file": ("slides.pptx", b"fake", "application/octet-stream")},
+    )
+    assert response.status_code == 400
+
+
+def test_upload_document_reports_generation_error(app_module, client):
+    with patch.object(
+        app_module, "generate_goldens_from_document", side_effect=RuntimeError("model unavailable")
+    ):
+        response = client.post(
+            "/api/documents",
+            data={"theme": "general_support"},
+            files={"file": ("policy.txt", b"text", "text/plain")},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "error"
+    assert "model unavailable" in body["error"]
+
+
+def test_list_and_delete_documents(app_module, client):
+    with patch.object(app_module, "generate_goldens_from_document", return_value=1):
+        created = client.post(
+            "/api/documents",
+            data={"theme": "general_support"},
+            files={"file": ("policy.txt", b"text", "text/plain")},
+        ).json()
+    listing = client.get("/api/documents?theme=general_support").json()
+    assert any(d["id"] == created["id"] for d in listing)
+    response = client.delete(f"/api/documents/{created['id']}")
+    assert response.status_code == 200
+    listing_after = client.get("/api/documents?theme=general_support").json()
+    assert not any(d["id"] == created["id"] for d in listing_after)
