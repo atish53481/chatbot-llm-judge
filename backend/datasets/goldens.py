@@ -47,6 +47,8 @@ def add_golden(
     expected_answer: str,
     context: list[str] | None = None,
     categories: list[str] | None = None,
+    source: str = "manual",
+    source_document: str | None = None,
 ) -> dict:
     with _LOCK:
         rows = _read_all()
@@ -57,6 +59,8 @@ def add_golden(
             "expected_answer": expected_answer,
             "context": context or [],
             "categories": categories or [],
+            "source": source,
+            "source_document": source_document,
         }
         rows.append(new_row)
         _write_all(rows)

@@ -95,3 +95,21 @@ def test_failed_write_keeps_existing_goldens(temp_goldens_file, monkeypatch):
 
     assert [r["id"] for r in g.load_goldens()] == ["g_0001"]
     assert not os.path.exists(str(temp_goldens_file) + ".tmp")
+
+
+def test_add_golden_defaults_source_to_manual(temp_goldens_file):
+    row = g.add_golden(theme="t", question="q", expected_answer="a")
+    assert row["source"] == "manual"
+    assert row["source_document"] is None
+
+
+def test_add_golden_records_synthesized_source(temp_goldens_file):
+    row = g.add_golden(
+        theme="t",
+        question="q",
+        expected_answer="a",
+        source="synthesized",
+        source_document="policy.pdf",
+    )
+    assert row["source"] == "synthesized"
+    assert row["source_document"] == "policy.pdf"
