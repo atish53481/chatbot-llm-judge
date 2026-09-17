@@ -20,11 +20,13 @@
         <span class="sr-only">Chatbot to judge</span>
         <select id="target-select"></select>
       </label>
+      <button id="edit-target" type="button" title="Edit this chatbot">Edit</button>
+      <button id="reset-target-runs" type="button" title="Clear this chatbot's score history (goldens and config stay)">Reset scores</button>
       <button id="delete-target" type="button" title="Delete this chatbot">Delete</button>
     </div>
     <p id="target-theme" class="muted small"></p>
     <details id="add-target">
-      <summary>Add a chatbot</summary>
+      <summary id="target-form-summary">Add a chatbot</summary>
       <form id="target-form" class="stack">
         <label>Name <input id="target-name" required maxlength="80"></label>
         <label>Connect via
@@ -41,6 +43,7 @@
         </div>
         <div data-for="commandcode openai http" class="stack">
           <label>API key <input id="target-api-key" type="password" autocomplete="off"></label>
+          <p id="target-api-key-hint" class="muted small hidden">Re-enter the key — it's never sent back for editing.</p>
         </div>
         <div data-for="commandcode openai" class="stack">
           <label>Model <input id="target-model" value="gpt-4o-mini"></label>
@@ -61,7 +64,8 @@
           <input id="target-theme-input" value="general_support" required pattern="[A-Za-z0-9_\-]+" title="Letters, digits, _ and -">
         </label>
         <div class="row">
-          <button type="submit" class="primary">Save chatbot</button>
+          <button type="submit" id="target-submit" class="primary">Save chatbot</button>
+          <button type="button" id="target-cancel" class="hidden">Cancel</button>
           <span id="target-form-error" class="status-error small" role="alert"></span>
         </div>
       </form>

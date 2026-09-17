@@ -146,6 +146,34 @@ async function runMetrics(target, metricKeys, onProgress) {
       finishedAt: Date.now(),
       result,
     });
+    // lastRun only remembers the single most recent metric; caseDetails keeps
+    // one entry per metric per target, so every card can show which question
+    // and answer its own score came from, not just whichever ran last.
+    await saveCaseDetails(target.id, key, result);
   }
   return results;
+}
+
+async function saveCaseDetails(targetId, metricKey, result) {
+  const all = await settings.get("caseDetails", {});
+  const forTarget = all[targetId] || {};
+  forTarget[metricKey] = {
+    finishedAt: Date.now(),
+    status: result.status,
+    error: result.error || null,
+    rows: result.rows || [],
+  };
+  await settings.set("caseDetails", { ...all, [targetId]: forTarget });
+}
+
+async function loadCaseDetails(targetId, metricKey) {
+  const all = await settings.get("caseDetails", {});
+  return (all[targetId] && all[targetId][metricKey]) || null;
+}
+
+async function clearCaseDetails(targetId) {
+  const all = await settings.get("caseDetails", {});
+  if (!(targetId in all)) return;
+  const { [targetId]: _dropped, ...rest } = all;
+  await settings.set("caseDetails", rest);
 }

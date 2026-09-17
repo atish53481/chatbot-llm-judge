@@ -111,7 +111,7 @@ class ChatRequest(BaseModel):
 def _build_target(row: dict) -> ChatbotClient:
     config = row["config"]
     if row["type"] == "mock":
-        return MockTargetClient()
+        return MockTargetClient(theme=config.get("theme", DEFAULT_THEME))
     if row["type"] == "http":
         return HttpTargetClient(config)
     if row["type"] == "dom":
@@ -181,11 +181,33 @@ def api_create_target(body: TargetCreate):
     return _public(storage.get_target(_conn, target_id))
 
 
+@app.put("/api/targets/{target_id}")
+def api_update_target(target_id: int, body: TargetCreate):
+    _target_or_404(target_id)
+    if body.type not in TARGET_TYPES:
+        raise HTTPException(
+            status_code=400, detail=f"type must be one of: {', '.join(TARGET_TYPES)}"
+        )
+    config = _apply_preset(body)
+    # Build the client once so a broken config is rejected before it is stored;
+    # same validation POST does, so switching e.g. dom -> http here is just as safe.
+    _client_or_400({"id": target_id, "type": body.type, "config": config})
+    storage.update_target(_conn, target_id, body.name, body.type, config)
+    return _public(storage.get_target(_conn, target_id))
+
+
 @app.delete("/api/targets/{target_id}")
 def api_delete_target(target_id: int):
     _target_or_404(target_id)
     storage.delete_target(_conn, target_id)
     return {"deleted": target_id}
+
+
+@app.delete("/api/targets/{target_id}/runs")
+def api_clear_target_runs(target_id: int):
+    _target_or_404(target_id)
+    cleared = storage.clear_runs(_conn, target_id)
+    return {"target_id": target_id, "cleared": cleared}
 
 
 @app.get("/api/goldens")

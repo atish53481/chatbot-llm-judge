@@ -122,11 +122,64 @@ summary {
   margin: 8px 0 0;
   padding: 0;
   font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.run-results li {
-  padding: 2px 0;
+.run-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.run-row-title {
+  grid-column: 1 / -1;
   overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
+
+.run-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--grid);
+  overflow: hidden;
+}
+
+.run-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--series-1);
+  border-radius: 3px;
+}
+
+.run-row.status-fail .run-bar-fill {
+  background: var(--status-critical);
+}
+
+.run-bar.running .run-bar-fill {
+  width: 40%;
+  animation: run-bar-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes run-bar-pulse {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+
+.run-row-chip {
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.run-row.status-pass .run-row-chip {
+  color: var(--success-text);
+}
+
+.run-row.status-fail .run-row-chip {
+  color: var(--status-critical);
 }
 
 .wide {

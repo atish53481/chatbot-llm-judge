@@ -113,6 +113,29 @@ def delete_target(conn: sqlite3.Connection, target_id: int) -> None:
         conn.commit()
 
 
+def update_target(conn: sqlite3.Connection, target_id: int, name: str, type_: str, config: dict) -> bool:
+    """Update a target in place, keeping its id (and so its run history)."""
+    with _LOCK:
+        cur = conn.execute(
+            "UPDATE targets SET name = ?, type = ?, config_json = ? WHERE id = ?",
+            (name, type_, json.dumps(config), target_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def clear_runs(conn: sqlite3.Connection, target_id: int) -> int:
+    """Wipe a target's run history only — the target itself and its goldens stay.
+
+    Mainly for after editing a target's type: old scores were produced by
+    whatever chatbot the target used to be, and no longer describe it.
+    """
+    with _LOCK:
+        cur = conn.execute("DELETE FROM runs WHERE target_id = ?", (target_id,))
+        conn.commit()
+        return cur.rowcount
+
+
 def record_run(
     conn: sqlite3.Connection,
     target_id: int,

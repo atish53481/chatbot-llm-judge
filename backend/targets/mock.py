@@ -4,6 +4,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 
 from backend.datasets.goldens import load_goldens
+from backend.metrics_catalog import DEFAULT_THEME
 from backend.targets.base import ChatbotClient, ChatReply
 
 FALLBACK = (
@@ -16,11 +17,17 @@ def _similarity(a: str, b: str) -> float:
 
 
 class MockTargetClient(ChatbotClient):
+    # theme scopes which golden set this canned chatbot answers from — it was
+    # previously ignored, so a mock target always answered from every theme
+    # in the database instead of just its own configured golden set.
+    def __init__(self, theme: str = DEFAULT_THEME):
+        self.theme = theme
+
     def health(self) -> dict:
         return {"status": "ok"}
 
     def chat(self, message: str, history: list[dict] | None = None) -> ChatReply:
-        goldens = load_goldens()
+        goldens = load_goldens(theme=self.theme)
         best = None
         best_score = 0.0
         for g in goldens:

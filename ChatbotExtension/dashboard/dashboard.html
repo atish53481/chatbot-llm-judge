@@ -15,25 +15,30 @@
       <label>Metric <select id="metric-select"></select></label>
       <button id="run-button" type="button" class="primary">Run judge</button>
     </div>
+    <div class="segmented" role="group" aria-label="Dashboard view">
+      <button type="button" data-view="judge" aria-pressed="true">Judge</button>
+      <button type="button" data-view="history" aria-pressed="false">History</button>
+    </div>
     <p id="status" class="secondary" role="status"></p>
   </header>
 
-  <section class="kpis" aria-label="Latest run summary">
-    <div class="card kpi">
-      <div class="kpi-label">Metrics passing</div>
-      <div id="kpi-passing" class="kpi-value">–</div>
+  <div id="judge-view">
+  <section id="status-strip" class="status-strip" aria-label="Status">
+    <div class="status-chip">
+      <span id="status-chatbot-dot" class="dot"></span>
+      <span id="status-chatbot-text">Chatbot —</span>
     </div>
-    <div class="card kpi">
-      <div class="kpi-label">Average score</div>
-      <div id="kpi-average" class="kpi-value">–</div>
+    <div class="status-chip">
+      <span id="status-judge-dot" class="dot"></span>
+      <span id="status-judge-text">Judge —</span>
     </div>
-    <div class="card kpi">
-      <div class="kpi-label">Golden answers</div>
-      <div id="kpi-goldens" class="kpi-value">–</div>
+    <div class="status-chip">
+      <span id="status-goldens-text" class="muted">–</span>
     </div>
-    <div class="card kpi">
-      <div class="kpi-label">Last run</div>
-      <div id="kpi-last-run" class="kpi-value kpi-small">–</div>
+    <div class="status-chip counts" aria-label="Latest run counts">
+      <span id="status-pass" class="count-pass">0 pass</span>
+      <span id="status-fail" class="count-fail">0 fail</span>
+      <span id="status-pending" class="count-pending">0 not run</span>
     </div>
   </section>
 
@@ -49,27 +54,13 @@
     </section>
 
     <section class="charts">
-      <div class="card">
+      <div class="card metric-grid-card">
         <div class="card-head">
-          <h2>Latest score per metric</h2>
-          <div class="segmented" role="group" aria-label="Latest scores view">
-            <button type="button" data-latest-view="bar" aria-pressed="true">Bar</button>
-            <button type="button" data-latest-view="radar" aria-pressed="false">Radar</button>
-            <button type="button" data-latest-view="table" aria-pressed="false">Table</button>
-          </div>
+          <h2>Metrics</h2>
+          <div id="category-chips" class="chips" role="group" aria-label="Category"></div>
         </div>
-        <div id="latest-chart-box" class="chart-box hidden">
-          <canvas id="latest-chart" role="img" aria-label="Latest score per metric"></canvas>
-        </div>
-        <div class="table-scroll">
-          <table id="latest-table" class="hidden">
-            <thead>
-              <tr><th>Metric</th><th class="num">Score</th><th class="num">Minimum</th><th>Result</th><th>Run time</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <p id="latest-empty" class="muted">No runs yet for this chatbot.</p>
+        <div id="metric-grid" class="metric-grid"></div>
+        <p id="metric-grid-empty" class="muted hidden">Pick a chatbot to see its metrics.</p>
       </div>
 
       <div class="card">
@@ -106,6 +97,23 @@
       </div>
     </section>
   </main>
+  </div>
+
+  <section id="history-view" class="card hidden" aria-labelledby="history-heading">
+    <div class="card-head">
+      <h2 id="history-heading">Run history</h2>
+      <p id="history-count" class="muted small"></p>
+    </div>
+    <p id="history-empty" class="muted">No runs yet for this chatbot.</p>
+    <div class="table-scroll">
+      <table id="history-table" class="hidden">
+        <thead>
+          <tr><th>Run time</th><th>Metric</th><th class="num">Score</th><th class="num">Minimum</th><th>Result</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
 
   <script src="../lib/vendor/chart.umd.min.js"></script>
   <script src="../lib/api.js"></script>

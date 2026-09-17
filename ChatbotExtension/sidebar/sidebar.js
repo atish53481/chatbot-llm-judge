@@ -11,6 +11,7 @@ const state = {
   activeTab: null,
   chart: null,
   editingGolden: null,
+  editingTarget: null,
 };
 
 function currentTarget() {
@@ -66,11 +67,56 @@ async function onTargetChanged() {
   await settings.set("selectedTargetId", target ? target.id : null);
   $("target-theme").textContent = target ? `Golden set: ${themeOf(target)}` : "";
   $("delete-target").disabled = !target;
+  $("edit-target").disabled = !target;
+  $("reset-target-runs").disabled = !target;
   $("run-results").replaceChildren();
   // Goldens belong to the target's theme, so drop any half-finished edit.
   resetGoldenForm();
+  // A half-finished target edit refers to whichever target was selected
+  // before; the selection just changed, so that edit no longer applies.
+  resetTargetForm();
   updateRunButton();
   await Promise.all([loadGoldens(), renderLatest()]);
+}
+
+// The target form doubles as the editor; resetTargetForm returns it to "add".
+function resetTargetForm() {
+  state.editingTarget = null;
+  $("target-form").reset();
+  syncTargetForm();
+  $("target-submit").textContent = "Save chatbot";
+  $("target-cancel").classList.add("hidden");
+  $("target-form-summary").textContent = "Add a chatbot";
+  $("target-api-key-hint").classList.add("hidden");
+}
+
+// The backend only stores the expanded HTTP config, not which preset built
+// it — commandcode and openai both expand to the same shape, so either one
+// maps back to "openai" (picking a preset again just re-derives that shape).
+function targetUiType(target) {
+  if (target.type === "mock" || target.type === "dom") return target.type;
+  return target.config.request_format === "openai_messages" ? "openai" : "http";
+}
+
+function startEditTarget(target) {
+  state.editingTarget = target.id;
+  $("target-name").value = target.name;
+  $("target-type").value = targetUiType(target);
+  syncTargetForm();
+  $("target-theme-input").value = themeOf(target);
+  $("target-api-key").value = "";
+  $("target-base-url").value = target.config.base_url || "";
+  $("target-model").value = target.config.model || "gpt-4o-mini";
+  $("target-chat-path").value = target.config.chat_path || "/chat";
+  $("target-message-field").value = target.config.message_field || "message";
+  $("target-response-path").value = target.config.response_path || "reply";
+  $("target-submit").textContent = "Save changes";
+  $("target-cancel").classList.remove("hidden");
+  $("target-form-summary").textContent = "Edit chatbot";
+  $("target-form-error").textContent = "";
+  $("target-api-key-hint").classList.toggle("hidden", targetUiType(target) === "mock" || targetUiType(target) === "dom");
+  $("add-target").open = true;
+  $("target-name").focus();
 }
 
 // The golden form doubles as the editor; resetGoldenForm returns it to "add".
@@ -230,7 +276,7 @@ async function trackActiveTab() {
   state.activeTab = tab || null;
 }
 
-function saveDomTarget(name, theme) {
+function saveDomTarget(name, theme, targetId) {
   const tab = state.activeTab;
   let url = null;
   try {
@@ -246,10 +292,10 @@ function saveDomTarget(name, theme) {
   return chrome.permissions.request({ origins: [origin] }).then(async (granted) => {
     if (!granted) throw new Error(`Permission for ${url.hostname} was declined.`);
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content_script.js"] });
-    return api("/api/targets", {
-      method: "POST",
-      body: { name, type: "dom", config: { session_id: url.hostname, theme } },
-    });
+    const body = { name, type: "dom", config: { session_id: url.hostname, theme } };
+    return targetId
+      ? api(`/api/targets/${targetId}`, { method: "PUT", body })
+      : api("/api/targets", { method: "POST", body });
   });
 }
 
@@ -261,25 +307,40 @@ $("target-form").addEventListener("submit", (event) => {
   const type = $("target-type").value;
   const name = $("target-name").value.trim();
   const theme = $("target-theme-input").value.trim() || DEFAULT_THEME;
+  const editingId = state.editingTarget;
   let saving;
   try {
-    saving =
-      type === "dom"
-        ? saveDomTarget(name, theme)
-        : api("/api/targets", { method: "POST", body: buildTargetBody(type, name, theme) });
+    if (type === "dom") {
+      saving = saveDomTarget(name, theme, editingId);
+    } else {
+      const body = buildTargetBody(type, name, theme);
+      saving = editingId
+        ? api(`/api/targets/${editingId}`, { method: "PUT", body })
+        : api("/api/targets", { method: "POST", body });
+    }
   } catch (error) {
     saving = Promise.reject(error);
   }
   saving
-    .then(async (created) => {
-      $("target-form").reset();
-      syncTargetForm();
+    .then(async (saved) => {
+      resetTargetForm();
       $("add-target").open = false;
-      await loadTargets(created.id);
+      await loadTargets(saved.id);
     })
     .catch((error) => {
       $("target-form-error").textContent = error.message;
     });
+});
+
+$("target-cancel").addEventListener("click", () => {
+  resetTargetForm();
+  $("target-form-error").textContent = "";
+  $("add-target").open = false;
+});
+
+$("edit-target").addEventListener("click", () => {
+  const target = currentTarget();
+  if (target) startEditTarget(target);
 });
 
 $("golden-form").addEventListener("submit", async (event) => {
@@ -328,6 +389,56 @@ armConfirm($("delete-target"), async () => {
   }
 });
 
+// Clears only this target's run history (goldens and config are untouched) —
+// mainly for after Edit changes a target's type, when old scores describe a
+// chatbot that no longer exists under this id.
+armConfirm($("reset-target-runs"), async () => {
+  const target = currentTarget();
+  if (!target) return;
+  try {
+    await api(`/api/targets/${target.id}/runs`, { method: "DELETE" });
+    const lastRun = await settings.get("lastRun", null);
+    if (lastRun && lastRun.targetId === target.id) await settings.set("lastRun", null);
+    await clearCaseDetails(target.id);
+    await renderLatest();
+  } catch (error) {
+    $("status").textContent = error.message;
+  }
+});
+
+// One score-bar row per metric: bar fill mirrors the dashboard's chart bars,
+// a chip on the right gives the pass/fail read at a glance.
+function renderRunRow(line, title, result) {
+  if (result === null) {
+    line.className = "run-row";
+    line.replaceChildren(
+      el("span", { className: "run-row-title" }, title),
+      el("span", { className: "run-bar running" }, el("span", { className: "run-bar-fill" })),
+      el("span", { className: "run-row-chip muted" }, "running…"),
+    );
+    return;
+  }
+  if (result.status === "error") {
+    line.className = "run-row";
+    line.replaceChildren(
+      el("span", { className: "run-row-title" }, title),
+      el("span", { className: "run-row-chip status-error" }, `! ${result.error}`),
+    );
+    return;
+  }
+  const pct = Math.max(0, Math.min(1, result.score ?? 0)) * 100;
+  line.className = `run-row status-${result.status}`;
+  line.replaceChildren(
+    el("span", { className: "run-row-title" }, title),
+    el("span", { className: "run-bar" }, el("span", { className: "run-bar-fill", style: `width:${pct}%` })),
+    el(
+      "span",
+      { className: "run-row-chip" },
+      `${formatScore(result.score)} ${result.status === "pass" ? "✓" : "✕"} (${result.cases_run} cases)`,
+    ),
+  );
+}
+
 $("run-button").addEventListener("click", async () => {
   const target = currentTarget();
   if (!target) return;
@@ -343,19 +454,7 @@ $("run-button").addEventListener("click", async () => {
         lines.set(key, el("li"));
         $("run-results").append(lines.get(key));
       }
-      const line = lines.get(key);
-      const title = titles.get(key) || key;
-      if (result === null) {
-        line.className = "muted";
-        line.textContent = `… ${title}: running`;
-      } else if (result.status === "error") {
-        line.className = "status-error";
-        line.textContent = `! ${title}: ${result.error}`;
-      } else {
-        line.className = `status-${result.status}`;
-        const icon = result.status === "pass" ? "✓" : "✕";
-        line.textContent = `${icon} ${title}: ${formatScore(result.score)} (${result.cases_run} cases)`;
-      }
+      renderRunRow(lines.get(key), titles.get(key) || key, result);
     });
   } finally {
     updateRunButton();
