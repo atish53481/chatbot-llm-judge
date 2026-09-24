@@ -56,10 +56,11 @@ Each spec's `cases(theme)` returns the probes whose `metric` equals its key.
 Domain Misuse, Role Violation and Non-Advice need to know what the bot is. Targets gain
 an optional config field `persona` (free text, e.g. "ShopEasy e-commerce support bot").
 `MetricSpec.cases()` gains a keyword `persona: str = ""`; for `security_probes` each
-item's `context` is `[f"The chatbot's intended role: {persona}"]` when set, else `[]`.
-Security specs pass `SingleTurnParams.CONTEXT` to G-Eval only when context is present
-(`build_case` puts `context` on the `LLMTestCase`), and the rubric says "if no role is
-given, judge against the role the bot itself claims". `runner.run_spec` passes the
+item's `context` is `[f"The chatbot's intended role: {persona}"]` when set, else
+`["No intended role was configured; judge against the role the chatbot claims for
+itself."]`. Security specs always pass `SingleTurnParams.CONTEXT` to G-Eval
+(`build_case` puts `context` on the `LLMTestCase`), so the case never lacks a field the
+metric reads. `runner.run_spec` passes the
 target's `persona` into `spec.cases()`. `persona` is not a header, so it is not masked.
 
 ### Probe dataset
@@ -71,8 +72,9 @@ target's `persona` into `spec.cases()`. `persona` is not a header, so it is not 
   `update_probe`, `delete_probe`, `reset_probes()` — same shape as
   `conversations.py`.
 - API: `GET/POST /api/security-probes`, `PUT/DELETE /api/security-probes/{id}`,
-  `POST /api/security-probes/reset`. The side panel calls reset on every load,
-  alongside the goldens and conversations reset.
+  `POST /api/security-probes/reset`. The side panel's existing
+  `POST /api/goldens/reset` (called on every load) also restores the probes and
+  reports `probes_restored`.
 - Tests redirect the probes path to a copy of a test fixture, like goldens.
 
 ## 2. Card metadata (`/api/metrics`)
@@ -153,7 +155,8 @@ Layout top to bottom:
    history sections, unchanged in function, restyled to the new theme.
 
 Theme: warm cream background, terracotta primary (`#c0654a`-ish), dark header
-(`#2b2521`-ish), mono for numbers/meta. Tokens on `:root` in `lib/theme.css`, with a
+(`#2b2521`-ish), mono for numbers/meta. The palette overrides the shared tokens on
+`body.dash` in `dashboard.css` (the side panel keeps `lib/theme.css` as is), with a
 `prefers-color-scheme: dark` variant. Thresholds still come from the side panel's
 stored `thresholds`/`thresholdEnv`.
 
@@ -186,7 +189,7 @@ Backend: `metrics_catalog.py`, `datasets/security_probes.py` (new),
 `datasets/security_probes.default.json` (new), `usage.py` (new),
 `judges/judge.py`, `targets/http_client.py`, `dashboard/runner.py`,
 `dashboard/app.py`, `.gitignore`.
-Extension: `dashboard/dashboard.{html,css,js}`, `lib/theme.css`, `lib/api.js`,
-`sidebar/sidebar.{html,js}` (persona field, probes reset).
+Extension: `dashboard/dashboard.{html,css,js}`, `lib/ui.js` (cases-per-run limit),
+`sidebar/sidebar.{html,js}` (persona field).
 Tests: as in §7, plus `tests/data/security_probes.json`.
 Docs: `CLAUDE.md`, `docs/WORKFLOW.md`, `README.md`.
