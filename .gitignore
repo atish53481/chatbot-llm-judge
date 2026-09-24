@@ -14,3 +14,7 @@ node_modules/
 # Edited copy of conversations.default.json (reset on every side panel load).
 backend/datasets/conversations.json
 backend/datasets/security_probes.json
+
+# Runtime uploads (reference documents for golden generation) and local screenshots
+backend/datasets/documents/
+Images/
