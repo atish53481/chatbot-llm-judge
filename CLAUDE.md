@@ -35,4 +35,4 @@ Live metrics against the real judge (spends tokens): `set RUN_LIVE_JUDGE=1`, the
 - **Storage** — `backend/storage.py`, SQLite tables for targets, runs and documents.
 - **Extension** — `sidebar/` (main UI), `dashboard/` (chat, trend/latest charts), `lib/api.js` (backend client). Views share selection state through `chrome.storage.local`.
 
-`01_Chatbot_Shopeasy_chatbot/` is a separate sample chatbot app used as a judging target, not part of the judge. It is untracked, and its `01_chatbot/` folder is gitignored.
+`01_Chatbot_Shopeasy_chatbot/` is a separate sample chatbot app used as a judging target, not part of the judge. It is committed without secrets: its real `.env` is gitignored and `.env.sample` holds placeholders only.
