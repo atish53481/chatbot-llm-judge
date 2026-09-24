@@ -13,6 +13,33 @@
     <p id="status" class="secondary" role="status">Checking backend…</p>
   </header>
 
+  <details id="judge-settings" class="card">
+    <summary>Judge settings <span id="judge-summary" class="muted small"></span></summary>
+    <form id="judge-form" class="stack">
+      <p class="muted small">The judge model scores the chatbot's answers. It must not be the chatbot being judged.</p>
+      <label>Provider
+        <select id="judge-provider">
+          <option value="groq" data-base-url="https://api.groq.com/openai/v1" data-model="openai/gpt-oss-120b">Groq</option>
+          <option value="commandcode" data-base-url="https://api.commandcode.ai/provider/v1" data-model="deepseek/deepseek-v4-flash">Command Code</option>
+          <option value="openai" data-base-url="https://api.openai.com/v1" data-model="gpt-4o-mini">OpenAI</option>
+          <option value="custom">Other OpenAI-compatible API</option>
+        </select>
+      </label>
+      <label>API key
+        <input id="judge-key" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <p id="judge-key-hint" class="muted small"></p>
+      <label>Model <input id="judge-model" spellcheck="false" placeholder="e.g. openai/gpt-oss-120b"></label>
+      <label>Base URL <input id="judge-base-url" spellcheck="false" placeholder="https://api.example.com/v1"></label>
+      <div class="row">
+        <button type="button" id="judge-test">Test</button>
+        <button type="submit" id="judge-save" class="primary">Save</button>
+        <button type="button" id="judge-clear-key" class="small-button hidden" title="Forget the key saved here and use the .env key again">Remove saved key</button>
+      </div>
+      <p id="judge-result" class="small" role="status"></p>
+    </form>
+  </details>
+
   <section class="card" aria-labelledby="chatbot-heading">
     <h2 id="chatbot-heading">Chatbot</h2>
     <div class="row">
@@ -29,40 +56,62 @@
       <summary id="target-form-summary">Add a chatbot</summary>
       <form id="target-form" class="stack">
         <label>Name <input id="target-name" required maxlength="80"></label>
-        <label>Connect via
-          <select id="target-type">
-            <option value="mock">Sample chatbot (built-in mock)</option>
-            <option value="commandcode" data-model="z-ai/glm-5.3-flash">Command Code (real model)</option>
-            <option value="openai" data-model="gpt-4o-mini">OpenAI-compatible API</option>
-            <option value="http">Custom HTTP API</option>
-            <option value="dom">Chatbot web page (no API)</option>
+        <details id="curl-import" open>
+          <summary>Fill from a real request (cURL)</summary>
+          <div class="stack">
+            <p class="muted small">
+              On the chatbot's website open DevTools (F12) &rarr; Network, send it a message,
+              right-click the chat request &rarr; Copy &rarr; <strong>Copy as cURL (bash)</strong>, and paste it here.
+              Every field below fills in by itself.
+            </p>
+            <label>cURL command <textarea id="curl-input" rows="4" spellcheck="false" placeholder="curl 'https://…' -H '…' --data-raw '…'"></textarea></label>
+            <label>Message you sent in that request (found automatically)
+              <input id="curl-sample-message" placeholder="found when you paste" title="Replaced with {{message}} so the judge can ask its own questions. Correct it and press Re-detect if the wrong text was picked.">
+            </label>
+            <div class="row">
+              <button type="button" id="curl-fill">Re-detect</button>
+              <span id="curl-status" class="small" role="status"></span>
+            </div>
+          </div>
+        </details>
+        <div class="row">
+          <label>Method
+            <select id="target-method">
+              <option>POST</option><option>GET</option><option>PUT</option><option>PATCH</option>
+            </select>
+          </label>
+          <label class="grow">URL <input id="target-url" required placeholder="https://chatbot.example/api/chat"></label>
+        </div>
+        <label>Headers (one "Name: value" per line)
+          <textarea id="target-headers" rows="3" spellcheck="false" placeholder="Content-Type: application/json&#10;Authorization: Bearer …"></textarea>
+        </label>
+        <p id="target-headers-hint" class="muted small hidden">Saved headers are hidden. Leave empty to keep them; type new ones to replace them all.</p>
+        <label><span>Body (put <code>{{message}}</code> where the question goes)</span>
+          <textarea id="target-body" rows="4" spellcheck="false" placeholder='{"message": "{{message}}"}'></textarea>
+        </label>
+        <label>Reply path
+          <input id="target-response-path" placeholder="e.g. reply or choices.0.message.content" title="Dotted path to the reply text in the JSON response (for a stream: in each event). Empty = the whole response text.">
+        </label>
+        <label>Retrieved context path (optional, for RAG metrics)
+          <input id="target-context-path" spellcheck="false" placeholder="e.g. sources or data.documents" title="Where the chatbot's response lists the documents it retrieved. Filled in automatically when the response has them. Needed for Contextual Precision / Recall / Relevancy.">
+        </label>
+        <label>Security probes
+          <select id="target-probe-set" title="Which red-team probes the Security metrics send: E-commerce ones mention orders, refunds and customers; Generic ones fit any assistant.">
+            <option value="ecommerce">E-commerce (orders, refunds, customers)</option>
+            <option value="generic">Generic (any assistant)</option>
           </select>
         </label>
-        <div data-for="openai http" class="stack">
-          <label>Base URL <input id="target-base-url" type="url" placeholder="https://api.example.com"></label>
-        </div>
-        <div data-for="commandcode openai http" class="stack">
-          <label>API key <input id="target-api-key" type="password" autocomplete="off"></label>
-          <p id="target-api-key-hint" class="muted small hidden">Re-enter the key — it's never sent back for editing.</p>
-        </div>
-        <div data-for="commandcode openai" class="stack">
-          <label>Model <input id="target-model" value="gpt-4o-mini"></label>
-        </div>
-        <div data-for="http" class="stack">
-          <label>Chat path <input id="target-chat-path" value="/chat"></label>
-          <label>Message field <input id="target-message-field" value="message"></label>
-          <label>Reply path
-            <input id="target-response-path" value="reply" title="Dotted path to the reply text, e.g. data.answer or choices.0.message.content">
-          </label>
-        </div>
-        <p data-for="dom" class="muted small">
-          Open the chatbot's page in the current tab first. After saving, click the chatbot's
-          message box, then its Send button (or press Esc to send with Enter), then the area
-          where its replies appear.
-        </p>
+        <label>Chatbot role (optional, for Security metrics)
+          <input id="target-persona" maxlength="300" placeholder="e.g. ShopEasy e-commerce support bot" title="What the chatbot is meant to be. Domain Misuse, Non-Advice and Role Violation are judged against it; empty = the role the bot claims for itself.">
+        </label>
+        <input id="target-history-path" type="hidden">
         <label>Golden set (theme)
           <input id="target-theme-input" value="general_support" required pattern="[A-Za-z0-9_\-]+" title="Letters, digits, _ and -">
         </label>
+        <div class="row">
+          <button type="button" id="target-test">Test</button>
+          <span id="target-test-result" class="small" role="status"></span>
+        </div>
         <div class="row">
           <button type="submit" id="target-submit" class="primary">Save chatbot</button>
           <button type="button" id="target-cancel" class="hidden">Cancel</button>
@@ -73,7 +122,10 @@
   </section>
 
   <section class="card" aria-labelledby="goldens-heading">
-    <h2 id="goldens-heading">Golden answers <span id="golden-count" class="muted"></span></h2>
+    <div class="card-heading">
+      <h2 id="goldens-heading">Golden answers <span id="golden-count" class="muted"></span></h2>
+      <button id="reset-goldens" type="button" class="small-button" title="Discard edits and deletes, and bring back the default golden answers">Reset to defaults</button>
+    </div>
     <ul id="golden-list" class="golden-list"></ul>
     <details id="add-golden">
       <summary id="golden-form-summary">Add a golden answer</summary>
@@ -91,11 +143,41 @@
     </details>
   </section>
 
-  <section class="card" aria-labelledby="documents-heading">
-    <h2 id="documents-heading">Generate from a document</h2>
+  <section class="card" aria-labelledby="conversations-heading">
+    <div class="card-heading">
+      <h2 id="conversations-heading">Conversation scenarios <span id="conversation-count" class="muted"></span></h2>
+      <button id="reset-conversations" type="button" class="small-button" title="Discard edits and deletes, and bring back the default scenarios">Reset to defaults</button>
+    </div>
     <p class="muted small">
-      Upload a reference or requirement document (PDF, TXT, DOCX, MD) and DeepEval
-      generates a golden set from it into the golden answers above.
+      Multi-turn tests for Conversation Completeness and Knowledge Retention. The user
+      turns are sent one by one, each with the conversation so far.
+    </p>
+    <ul id="conversation-list" class="golden-list"></ul>
+    <details id="add-conversation">
+      <summary id="conversation-form-summary">Add a scenario</summary>
+      <form id="conversation-form" class="stack">
+        <label>Name <input id="conversation-name" required maxlength="200"></label>
+        <label>User turns (one message per line, sent in order)
+          <textarea id="conversation-turns" rows="4" required placeholder="Hi, my order number is 48213.&#10;How long does shipping take?&#10;Which order number did I give you?"></textarea>
+        </label>
+        <label>Expected outcome <textarea id="conversation-outcome" rows="2" placeholder="What a complete, good conversation achieves"></textarea></label>
+        <label>Scenario (optional) <textarea id="conversation-scenario" rows="2"></textarea></label>
+        <label>Chatbot role (optional) <input id="conversation-role" placeholder="a customer support assistant for an online store"></label>
+        <div class="row">
+          <button type="submit" id="conversation-submit" class="primary">Add scenario</button>
+          <button type="button" id="conversation-cancel" class="hidden">Cancel</button>
+          <span id="conversation-form-error" class="status-error small" role="alert"></span>
+        </div>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="documents-heading">
+    <h2 id="documents-heading">Generate from a document or web page</h2>
+    <p class="muted small">
+      Upload a reference or requirement document (PDF, TXT, DOCX, MD), or give the
+      address of the chatbot's help / FAQ page, and DeepEval generates a golden set
+      from it into the golden answers above.
     </p>
     <form id="document-form" class="stack">
       <input id="document-file" type="file" accept=".pdf,.txt,.docx,.md,.markdown,.mdx" required>
@@ -104,24 +186,44 @@
         <span id="document-form-error" class="status-error small" role="alert"></span>
       </div>
     </form>
+    <form id="url-form" class="stack">
+      <label>Help / FAQ page address
+        <input id="document-url" type="url" required placeholder="https://example.com/help" spellcheck="false" title="A page with static text (not built by JavaScript). If it has none, save it as a PDF and upload that instead.">
+      </label>
+      <div class="row">
+        <button type="submit" id="url-submit" class="primary">Generate from URL</button>
+        <span id="url-form-error" class="status-error small" role="alert"></span>
+      </div>
+    </form>
     <ul id="document-list" class="document-list"></ul>
   </section>
 
   <section class="card" aria-labelledby="judge-heading">
     <h2 id="judge-heading">Judge</h2>
-    <div class="row">
-      <label class="grow">
-        <span class="sr-only">Metric</span>
-        <select id="metric-select"></select>
+    <div class="row threshold-env-row">
+      <label class="grow">Thresholds for
+        <select id="threshold-env" title="Pick a preset from the threshold strategy, or edit any metric below (Custom)"></select>
       </label>
-      <button id="run-button" type="button" class="primary">Run judge</button>
+    </div>
+    <details id="threshold-details" open>
+      <summary>Metrics to run <span id="metric-check-count" class="muted small"></span></summary>
+      <div class="row metric-check-actions">
+        <button type="button" id="check-all-metrics" class="small-button">All</button>
+        <button type="button" id="check-no-metrics" class="small-button">None</button>
+        <span class="muted small">Tick metrics to run · ≥ higher is better, ≤ lower is better</span>
+      </div>
+      <div id="threshold-table" class="threshold-table"></div>
+    </details>
+    <div class="row run-row-buttons">
+      <button id="run-button" type="button" class="primary grow">Run judge</button>
+      <button id="stop-button" type="button" class="danger hidden" title="Stop this run (the judge call in progress finishes first)">Stop</button>
     </div>
     <ul id="run-results" class="run-results" aria-live="polite"></ul>
     <h3>Latest scores</h3>
     <div id="latest-chart-box" class="chart-box hidden">
       <canvas id="latest-chart" role="img" aria-label="Latest score per metric"></canvas>
     </div>
-    <p id="latest-empty" class="muted small">No runs yet for this chatbot. Pick a metric and press Run judge.</p>
+    <p id="latest-empty" class="muted small">No runs yet for this chatbot. Tick metrics and press Run judge.</p>
   </section>
 
   <button id="open-dashboard" type="button" class="wide">Open dashboard</button>

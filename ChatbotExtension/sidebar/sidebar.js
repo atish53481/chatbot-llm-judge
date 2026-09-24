@@ -8,10 +8,13 @@ const state = {
   metrics: [],
   backendUp: false,
   judgeUp: false,
-  activeTab: null,
   chart: null,
   editingGolden: null,
   editingTarget: null,
+  editingConversation: null,
+  // Metric keys ticked to run (saved as "checkedMetrics"; all by default).
+  checked: new Set(),
+  runControl: null,
 };
 
 function currentTarget() {
@@ -22,10 +25,14 @@ function currentTarget() {
 function updateRunButton() {
   const button = $("run-button");
   const ready = state.judgeUp && currentTarget() !== null;
-  button.disabled = !ready;
-  if (ready) button.title = "";
+  const count = state.checked.size;
+  button.textContent = count ? `Run judge (${count} metric${count === 1 ? "" : "s"})` : "Run judge";
+  // The status refresh calls this every 10s; a run in flight keeps the button off.
+  button.disabled = !ready || state.runControl !== null || count === 0;
+  if (ready && count === 0) button.title = "Tick at least one metric";
+  else if (ready) button.title = "";
   else if (state.judgeUp) button.title = "Add or pick a chatbot first";
-  else button.title = "Judge not configured: JUDGE_API_KEY is missing";
+  else button.title = "Judge not configured: add its API key in Judge settings";
 }
 
 async function refreshStatus() {
@@ -35,7 +42,7 @@ async function refreshStatus() {
     state.judgeUp = status.judge.up;
     $("status").textContent = state.judgeUp
       ? `Judge ready · ${status.judge.model}`
-      : "Judge not configured: add JUDGE_API_KEY to .env, then restart the backend.";
+      : "Judge not configured: add its API key in Judge settings below.";
   } catch (error) {
     state.backendUp = false;
     state.judgeUp = false;
@@ -46,14 +53,16 @@ async function refreshStatus() {
 
 async function loadMetrics() {
   state.metrics = await api("/api/metrics");
-  const saved = await settings.get("selectedMetric", ALL_METRICS);
-  fillSelect($("metric-select"), metricOptions(state.metrics), saved);
+  await renderThresholds();
 }
 
 async function loadTargets(preferredId) {
   state.targets = await fetchTargets();
   const wanted = preferredId ?? (await settings.get("selectedTargetId", null));
-  const selected = state.targets.some((t) => t.id === wanted) ? wanted : state.targets[0].id;
+  const fallback = state.targets.length ? state.targets[0].id : null;
+  const selected = state.targets.some((t) => t.id === wanted) ? wanted : fallback;
+  // No chatbot yet: open the form, since nothing else works without one.
+  if (!state.targets.length) $("add-target").open = true;
   fillSelect(
     $("target-select"),
     state.targets.map((t) => ({ value: t.id, label: targetLabel(t) })),
@@ -76,59 +85,66 @@ async function onTargetChanged() {
   // before; the selection just changed, so that edit no longer applies.
   resetTargetForm();
   updateRunButton();
-  await Promise.all([loadGoldens(), renderLatest(), loadDocuments()]);
+  resetConversationForm();
+  await Promise.all([loadGoldens(), loadConversations(), renderLatest(), loadDocuments()]);
 }
 
 // The target form doubles as the editor; resetTargetForm returns it to "add".
 function resetTargetForm() {
   state.editingTarget = null;
   $("target-form").reset();
-  syncTargetForm();
   $("target-submit").textContent = "Save chatbot";
   $("target-cancel").classList.add("hidden");
   $("target-form-summary").textContent = "Add a chatbot";
-  $("target-api-key-hint").classList.add("hidden");
-}
-
-// The backend only stores the expanded HTTP config, not which preset built
-// it — commandcode and openai both expand to the same shape, so either one
-// maps back to "openai" (picking a preset again just re-derives that shape).
-function targetUiType(target) {
-  if (target.type === "mock" || target.type === "dom") return target.type;
-  return target.config.request_format === "openai_messages" ? "openai" : "http";
+  $("target-headers-hint").classList.add("hidden");
+  $("curl-import").open = true;
+  $("curl-status").textContent = "";
+  $("target-test-result").textContent = "";
 }
 
 function startEditTarget(target) {
+  const config = target.config;
   state.editingTarget = target.id;
   $("target-name").value = target.name;
-  $("target-type").value = targetUiType(target);
-  syncTargetForm();
+  $("target-method").value = config.method || "POST";
+  $("target-url").value = config.url || "";
+  // Header values are masked by the backend; empty keeps the stored ones.
+  $("target-headers").value = "";
+  $("target-headers-hint").classList.toggle("hidden", !config.headers || !Object.keys(config.headers).length);
+  $("target-body").value = config.body_template || "";
+  $("target-response-path").value = config.response_path || "";
+  $("target-context-path").value = config.context_path || "";
+  $("target-persona").value = config.persona || "";
+  $("target-probe-set").value = config.probe_set || "ecommerce";
+  $("target-history-path").value = config.history_path || "";
   $("target-theme-input").value = themeOf(target);
-  $("target-api-key").value = "";
-  $("target-base-url").value = target.config.base_url || "";
-  $("target-model").value = target.config.model || "gpt-4o-mini";
-  $("target-chat-path").value = target.config.chat_path || "/chat";
-  $("target-message-field").value = target.config.message_field || "message";
-  $("target-response-path").value = target.config.response_path || "reply";
+  $("curl-import").open = false;
+  $("curl-status").textContent = "";
+  $("target-test-result").textContent = "";
   $("target-submit").textContent = "Save changes";
   $("target-cancel").classList.remove("hidden");
   $("target-form-summary").textContent = "Edit chatbot";
   $("target-form-error").textContent = "";
-  $("target-api-key-hint").classList.toggle("hidden", targetUiType(target) === "mock" || targetUiType(target) === "dom");
   $("add-target").open = true;
   $("target-name").focus();
 }
 
-// The golden form doubles as the editor; resetGoldenForm returns it to "add".
+// The golden form doubles as the editor: editing moves it into the list under
+// the row being edited; resetGoldenForm moves it back and returns it to "add".
 function resetGoldenForm() {
   state.editingGolden = null;
-  $("golden-form").reset();
+  const form = $("golden-form");
+  form.reset();
   $("golden-submit").textContent = "Add golden answer";
   $("golden-cancel").classList.add("hidden");
-  $("golden-form-summary").textContent = "Add a golden answer";
+  $("add-golden").append(form);
+  $("golden-list").classList.remove("editing");
+  document.querySelectorAll(".golden-editor").forEach((node) => node.remove());
+  document.querySelectorAll(".golden-list li.selected").forEach((node) => node.classList.remove("selected"));
 }
 
-function startEditGolden(golden) {
+function startEditGolden(golden, row) {
+  resetGoldenForm();
   state.editingGolden = golden.id;
   $("golden-question").value = golden.question;
   $("golden-answer").value = golden.expected_answer;
@@ -136,9 +152,12 @@ function startEditGolden(golden) {
   $("golden-categories").value = (golden.categories || []).join(", ");
   $("golden-submit").textContent = "Save changes";
   $("golden-cancel").classList.remove("hidden");
-  $("golden-form-summary").textContent = "Edit golden answer";
   $("golden-form-error").textContent = "";
-  $("add-golden").open = true;
+  $("add-golden").open = false;
+  row.classList.add("selected");
+  row.after(el("li", { className: "golden-editor" }, $("golden-form")));
+  $("golden-list").classList.add("editing");
+  row.scrollIntoView({ block: "nearest" });
   $("golden-question").focus();
 }
 
@@ -170,6 +189,8 @@ async function loadDocuments() {
 async function loadGoldens() {
   const target = currentTarget();
   const list = $("golden-list");
+  // Re-rendering the list would detach the form while it sits inside it.
+  if (list.contains($("golden-form"))) resetGoldenForm();
   if (!target) {
     list.replaceChildren();
     $("golden-count").textContent = "";
@@ -202,7 +223,7 @@ async function loadGoldens() {
         el("button", {
           type: "button",
           "aria-label": `Edit golden answer: ${golden.question}`,
-          onclick: () => startEditGolden(golden),
+          onclick: (event) => startEditGolden(golden, event.currentTarget.closest("li")),
         }, "Edit"),
         confirmButton("Delete", `Delete golden answer: ${golden.question}`, async () => {
           try {
@@ -230,7 +251,7 @@ async function renderLatest() {
     $("latest-empty").classList.toggle("hidden", hasRuns);
     if (hasRuns) {
       box.style.height = `${rows.length * 30 + 80}px`;
-      state.chart = drawChart($("latest-chart"), state.chart, latestChartConfig(rows, state.metrics, "bar"));
+      state.chart = drawChart($("latest-chart"), state.chart, latestChartConfig(rows, withUserThresholds(state.metrics, await settings.get("thresholds", {})), "bar"));
     } else if (state.chart) {
       state.chart.destroy();
       state.chart = null;
@@ -242,119 +263,127 @@ async function renderLatest() {
   }
 }
 
-function syncTargetForm() {
-  const type = $("target-type").value;
-  for (const block of document.querySelectorAll("#target-form [data-for]")) {
-    block.classList.toggle("hidden", !block.dataset.for.split(" ").includes(type));
+function parseHeaderLines(text) {
+  const headers = {};
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    const colon = line.indexOf(":");
+    if (colon <= 0) throw new Error(`Header line needs "Name: value": ${line.trim()}`);
+    headers[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
   }
+  return headers;
 }
 
-// Each provider suggests its own model id; follow it when the user switches
-// providers. They can still type any model id they like afterwards.
-function applySuggestedModel() {
-  const option = $("target-type").selectedOptions[0];
-  if (option && option.dataset.model) $("target-model").value = option.dataset.model;
-}
-
-function buildTargetBody(type, name, theme) {
+// The connector config the form describes. Headers are left out when the
+// box is empty while editing, so the backend keeps the stored (masked) ones.
+function buildTargetConfig() {
   const value = (id) => $(id).value.trim();
-  if (type === "mock") {
-    return { name, type: "mock", config: { theme } };
+  const config = {
+    method: $("target-method").value,
+    url: value("target-url"),
+    body_template: $("target-body").value.trim(),
+    response_path: value("target-response-path"),
+    context_path: value("target-context-path"),
+    persona: value("target-persona"),
+    probe_set: $("target-probe-set").value,
+    history_path: value("target-history-path"),
+    theme: value("target-theme-input") || DEFAULT_THEME,
+  };
+  if (!config.url) throw new Error("URL is required.");
+  if (!`${config.url}${config.body_template}`.includes("{{message}}")) {
+    throw new Error("Put {{message}} in the body (or URL) where the question goes.");
   }
-  if (type === "commandcode") {
-    const apiKey = value("target-api-key");
-    if (!apiKey) throw new Error("API key is required for Command Code.");
-    const config = { api_key: apiKey, theme };
-    const model = value("target-model");
-    if (model) config.model = model;
-    return { name, type: "http", preset: "commandcode", config };
-  }
-  const baseUrl = value("target-base-url");
-  if (!baseUrl) throw new Error("Base URL is required.");
-  if (type === "openai") {
-    const apiKey = value("target-api-key");
-    if (!apiKey) throw new Error("API key is required for an OpenAI-compatible API.");
-    return {
-      name,
-      type: "http",
-      preset: "openai_compatible",
-      config: { base_url: baseUrl, api_key: apiKey, model: value("target-model") || "gpt-4o-mini", theme },
-    };
-  }
-  if (type === "http") {
-    const config = {
-      base_url: baseUrl,
-      chat_path: value("target-chat-path") || "/chat",
-      message_field: value("target-message-field") || "message",
-      response_path: value("target-response-path") || "reply",
-      theme,
-    };
-    const apiKey = value("target-api-key");
-    if (apiKey) config.headers = { Authorization: `Bearer ${apiKey}` };
-    return { name, type: "http", config };
-  }
-  throw new Error(`Unknown chatbot type: ${type}`);
+  const headerText = $("target-headers").value;
+  if (headerText.trim() || !state.editingTarget) config.headers = parseHeaderLines(headerText);
+  return config;
 }
 
-async function trackActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  state.activeTab = tab || null;
-}
-
-function saveDomTarget(name, theme, targetId) {
-  const tab = state.activeTab;
-  let url = null;
-  try {
-    url = new URL(tab && tab.url);
-  } catch {
-    url = null;
-  }
-  if (!url || !/^https?:$/.test(url.protocol)) {
-    return Promise.reject(new Error("Open the chatbot's web page (http or https) in the current tab first."));
-  }
-  const origin = `${url.protocol}//${url.hostname}/*`;
-  // permissions.request must be the first async call so Chrome still sees the click.
-  return chrome.permissions.request({ origins: [origin] }).then(async (granted) => {
-    if (!granted) throw new Error(`Permission for ${url.hostname} was declined.`);
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content_script.js"] });
-    const body = { name, type: "dom", config: { session_id: url.hostname, theme } };
-    return targetId
-      ? api(`/api/targets/${targetId}`, { method: "PUT", body })
-      : api("/api/targets", { method: "POST", body });
-  });
-}
-
-$("target-form").addEventListener("submit", (event) => {
-  // Not async on purpose: a "web page" chatbot must request its permission
-  // synchronously inside this click.
+$("target-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   $("target-form-error").textContent = "";
-  const type = $("target-type").value;
-  const name = $("target-name").value.trim();
-  const theme = $("target-theme-input").value.trim() || DEFAULT_THEME;
   const editingId = state.editingTarget;
-  let saving;
   try {
-    if (type === "dom") {
-      saving = saveDomTarget(name, theme, editingId);
+    const body = { name: $("target-name").value.trim(), type: "http", config: buildTargetConfig() };
+    const saved = editingId
+      ? await api(`/api/targets/${editingId}`, { method: "PUT", body })
+      : await api("/api/targets", { method: "POST", body });
+    resetTargetForm();
+    $("add-target").open = false;
+    await loadTargets(saved.id);
+  } catch (error) {
+    $("target-form-error").textContent = error.message;
+  }
+});
+
+// Fills every field from the pasted cURL: the backend finds the question
+// (or uses the corrected one in the message box), empties the conversation
+// history, and sends the question once to find where the reply sits.
+async function fillFromCurl() {
+  const status = $("curl-status");
+  const result = $("target-test-result");
+  if (!$("curl-input").value.trim()) return;
+  status.className = "small";
+  status.textContent = "Reading the request and asking the chatbot once…";
+  result.textContent = "";
+  $("curl-fill").disabled = true;
+  try {
+    const parsed = await api("/api/targets/parse-curl", {
+      method: "POST",
+      body: { curl: $("curl-input").value, sample_message: $("curl-sample-message").value.trim() },
+    });
+    $("target-method").value = parsed.method;
+    $("target-url").value = parsed.url;
+    $("target-headers").value = Object.entries(parsed.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
+    $("target-body").value = parsed.body_template;
+    $("curl-sample-message").value = parsed.sample_message;
+    $("target-response-path").value = parsed.response_path;
+    $("target-context-path").value = parsed.context_path || "";
+    $("target-history-path").value = parsed.history_path || "";
+    if (!$("target-name").value.trim()) $("target-name").value = new URL(parsed.url).host;
+
+    if (!parsed.message_marked) {
+      status.className = "small status-error";
+      status.textContent = "Couldn't find the message: type it above and press Re-detect, or put {{message}} into the body.";
+    } else if (parsed.probe_error) {
+      status.className = "small status-error";
+      status.textContent = "Filled, but the test request failed; check it with Test.";
+      result.className = "small status-error";
+      result.textContent = parsed.probe_error;
     } else {
-      const body = buildTargetBody(type, name, theme);
-      saving = editingId
-        ? api(`/api/targets/${editingId}`, { method: "PUT", body })
-        : api("/api/targets", { method: "POST", body });
+      status.className = "small status-pass";
+      status.textContent = `Filled. Reply found at "${parsed.response_path || "(whole response)"}". Check it and press Save chatbot.`;
+      result.className = "small status-pass";
+      result.textContent = `Reply: ${parsed.reply_preview.slice(0, 300)}`;
     }
   } catch (error) {
-    saving = Promise.reject(error);
+    status.className = "small status-error";
+    status.textContent = error.message;
+  } finally {
+    $("curl-fill").disabled = false;
   }
-  saving
-    .then(async (saved) => {
-      resetTargetForm();
-      $("add-target").open = false;
-      await loadTargets(saved.id);
-    })
-    .catch((error) => {
-      $("target-form-error").textContent = error.message;
-    });
+}
+
+$("curl-fill").addEventListener("click", fillFromCurl);
+// A new paste means a new request, so the old message is not reused.
+$("curl-input").addEventListener("paste", () => {
+  $("curl-sample-message").value = "";
+  setTimeout(fillFromCurl, 0);
+});
+
+$("target-test").addEventListener("click", async () => {
+  const result = $("target-test-result");
+  result.className = "small";
+  result.textContent = "Sending a test question…";
+  try {
+    const body = { type: "http", config: buildTargetConfig(), message: "Hello, what can you help me with?" };
+    if (state.editingTarget) body.target_id = state.editingTarget;
+    const test = await api("/api/targets/test", { method: "POST", body });
+    result.className = test.ok ? "small status-pass" : "small status-error";
+    result.textContent = test.ok ? `Reply: ${test.reply.slice(0, 300)}` : test.error;
+  } catch (error) {
+    result.className = "small status-error";
+    result.textContent = error.message;
+  }
 });
 
 $("target-cancel").addEventListener("click", () => {
@@ -429,10 +458,166 @@ $("document-form").addEventListener("submit", async (event) => {
   }
 });
 
+$("url-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("url-form-error").textContent = "";
+  const target = currentTarget();
+  if (!target) return;
+  const url = $("document-url").value.trim();
+  if (!url) return;
+  $("url-submit").disabled = true;
+  $("url-submit").textContent = "Fetching and generating… (real LLM calls, can take a while)";
+  try {
+    const result = await api("/api/documents/url", { method: "POST", body: { theme: themeOf(target), url } });
+    if (result.status === "error") {
+      $("url-form-error").textContent = result.error;
+    } else {
+      $("document-url").value = "";
+      await loadGoldens();
+    }
+    await loadDocuments();
+  } catch (error) {
+    $("url-form-error").textContent = error.message;
+  } finally {
+    $("url-submit").disabled = false;
+    $("url-submit").textContent = "Generate from URL";
+  }
+});
+
 $("golden-cancel").addEventListener("click", () => {
   resetGoldenForm();
   $("golden-form-error").textContent = "";
   $("add-golden").open = false;
+});
+
+// --- Conversation scenarios (multi-turn metrics) -----------------------------
+function resetConversationForm() {
+  state.editingConversation = null;
+  $("conversation-form").reset();
+  $("conversation-submit").textContent = "Add scenario";
+  $("conversation-cancel").classList.add("hidden");
+  $("conversation-form-summary").textContent = "Add a scenario";
+  $("conversation-form-error").textContent = "";
+}
+
+function startEditConversation(scenario) {
+  state.editingConversation = scenario.id;
+  $("conversation-name").value = scenario.name;
+  $("conversation-turns").value = scenario.user_turns.join("\n");
+  $("conversation-outcome").value = scenario.expected_outcome || "";
+  $("conversation-scenario").value = scenario.scenario || "";
+  $("conversation-role").value = scenario.chatbot_role || "";
+  $("conversation-submit").textContent = "Save changes";
+  $("conversation-cancel").classList.remove("hidden");
+  $("conversation-form-summary").textContent = "Edit scenario";
+  $("add-conversation").open = true;
+  $("conversation-name").focus();
+}
+
+async function loadConversations() {
+  const target = currentTarget();
+  const list = $("conversation-list");
+  if (!target) {
+    list.replaceChildren();
+    $("conversation-count").textContent = "";
+    return;
+  }
+  let scenarios = [];
+  try {
+    scenarios = await api(`/api/conversations?theme=${encodeURIComponent(themeOf(target))}`);
+  } catch (error) {
+    $("conversation-form-error").textContent = error.message;
+  }
+  $("conversation-count").textContent = `(${scenarios.length})`;
+  if (!scenarios.length) {
+    list.replaceChildren(el("li", { className: "muted" },
+      "No scenarios for this golden set yet: the multi-turn metrics need at least one."));
+    return;
+  }
+  list.replaceChildren(...scenarios.map((scenario) => el(
+    "li",
+    {},
+    el(
+      "div",
+      { className: "text", title: scenario.user_turns.map((t, i) => `${i + 1}. ${t}`).join("\n") },
+      el("div", { className: "question" }, scenario.name),
+      el("div", { className: "answer" },
+        `${scenario.user_turns.length} turn${scenario.user_turns.length === 1 ? "" : "s"} · ${scenario.expected_outcome || "no expected outcome"}`),
+    ),
+    el("button", {
+      type: "button",
+      "aria-label": `Edit scenario: ${scenario.name}`,
+      onclick: () => startEditConversation(scenario),
+    }, "Edit"),
+    confirmButton("Delete", `Delete scenario: ${scenario.name}`, async () => {
+      try {
+        await api(`/api/conversations/${encodeURIComponent(scenario.id)}`, { method: "DELETE" });
+      } catch (error) {
+        $("conversation-form-error").textContent = error.message;
+      }
+      if (state.editingConversation === scenario.id) resetConversationForm();
+      await loadConversations();
+    }),
+  )));
+}
+
+$("conversation-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("conversation-form-error").textContent = "";
+  const target = currentTarget();
+  if (!target) return;
+  const body = {
+    theme: themeOf(target),
+    name: $("conversation-name").value.trim(),
+    user_turns: $("conversation-turns").value.split("\n").map((s) => s.trim()).filter(Boolean),
+    expected_outcome: $("conversation-outcome").value.trim(),
+    scenario: $("conversation-scenario").value.trim(),
+    chatbot_role: $("conversation-role").value.trim(),
+  };
+  if (!body.user_turns.length) {
+    $("conversation-form-error").textContent = "Add at least one user turn.";
+    return;
+  }
+  try {
+    const editing = state.editingConversation;
+    if (editing) {
+      await api(`/api/conversations/${encodeURIComponent(editing)}`, { method: "PUT", body });
+    } else {
+      await api("/api/conversations", { method: "POST", body });
+    }
+    resetConversationForm();
+    $("add-conversation").open = false;
+    await loadConversations();
+  } catch (error) {
+    $("conversation-form-error").textContent = error.message;
+  }
+});
+
+$("conversation-cancel").addEventListener("click", () => {
+  resetConversationForm();
+  $("add-conversation").open = false;
+});
+
+armConfirm($("reset-conversations"), async () => {
+  try {
+    await api("/api/conversations/reset", { method: "POST", body: {} });
+    resetConversationForm();
+    await loadConversations();
+  } catch (error) {
+    $("conversation-form-error").textContent = error.message;
+  }
+});
+
+// Two clicks (Confirm), since it discards this session's golden edits.
+armConfirm($("reset-goldens"), async () => {
+  $("golden-form-error").textContent = "";
+  try {
+    await api("/api/goldens/reset", { method: "POST", body: {} });
+    resetGoldenForm();
+    await loadGoldens();
+  } catch (error) {
+    $("golden-form-error").textContent = error.message;
+  }
 });
 
 armConfirm($("delete-target"), async () => {
@@ -465,13 +650,26 @@ armConfirm($("reset-target-runs"), async () => {
 
 // One score-bar row per metric: bar fill mirrors the dashboard's chart bars,
 // a chip on the right gives the pass/fail read at a glance.
-function renderRunRow(line, title, result) {
+function renderRunRow(line, title, result, progress) {
   if (result === null) {
+    const known = progress && progress.total;
+    const fill = known
+      ? el("span", { className: "run-bar-fill", style: `width:${progressFraction(progress) * 100}%` })
+      : el("span", { className: "run-bar-fill" });
     line.className = "run-row";
     line.replaceChildren(
       el("span", { className: "run-row-title" }, title),
-      el("span", { className: "run-bar running" }, el("span", { className: "run-bar-fill" })),
-      el("span", { className: "run-row-chip muted" }, "running…"),
+      el("span", { className: known ? "run-bar" : "run-bar running" }, fill),
+      el("span", { className: "run-row-chip muted" }, known ? `${progress.done}/${progress.total}` : "running…"),
+      el("span", { className: "run-row-detail muted" }, progressText(progress)),
+    );
+    return;
+  }
+  if (result.status === "cancelled") {
+    line.className = "run-row";
+    line.replaceChildren(
+      el("span", { className: "run-row-title" }, title),
+      el("span", { className: "run-row-chip muted" }, `■ ${result.error} (not saved)`),
     );
     return;
   }
@@ -491,7 +689,7 @@ function renderRunRow(line, title, result) {
     el(
       "span",
       { className: "run-row-chip" },
-      `${formatScore(result.score)} ${result.status === "pass" ? "✓" : "✕"} (${result.cases_run} cases)`,
+      `${formatScore(result.score)} ${comparator(result.direction)} ${formatScore(result.threshold)} ${result.status === "pass" ? "✓" : "✕"} (${result.cases_run} cases)`,
     ),
   );
 }
@@ -499,22 +697,40 @@ function renderRunRow(line, title, result) {
 $("run-button").addEventListener("click", async () => {
   const target = currentTarget();
   if (!target) return;
-  const choice = $("metric-select").value;
-  const keys = choice === ALL_METRICS ? state.metrics.map((m) => m.key) : [choice];
+  // Ticked metrics, in catalog order.
+  const keys = state.metrics.filter((m) => state.checked.has(m.key)).map((m) => m.key);
+  if (!keys.length) return;
   const titles = new Map(state.metrics.map((m) => [m.key, m.title]));
   const lines = new Map();
   $("run-results").replaceChildren();
   $("run-button").disabled = true;
+  state.runControl = {};
+  $("stop-button").disabled = false;
+  $("stop-button").textContent = "Stop";
+  $("stop-button").classList.remove("hidden");
   try {
-    await runMetrics(target, keys, (key, result) => {
+    await runMetrics(target, keys, (key, result, progress) => {
       if (!lines.has(key)) {
         lines.set(key, el("li"));
         $("run-results").append(lines.get(key));
       }
-      renderRunRow(lines.get(key), titles.get(key) || key, result);
-    });
+      renderRunRow(lines.get(key), titles.get(key) || key, result, progress);
+    }, state.runControl);
   } finally {
+    state.runControl = null;
+    $("stop-button").classList.add("hidden");
     updateRunButton();
+  }
+});
+
+$("stop-button").addEventListener("click", async () => {
+  if (!state.runControl) return;
+  $("stop-button").disabled = true;
+  $("stop-button").textContent = "Stopping…";
+  try {
+    await stopRun(state.runControl);
+  } catch (error) {
+    $("status").textContent = error.message;
   }
 });
 
@@ -523,16 +739,107 @@ $("target-select").addEventListener("change", () => {
     $("status").textContent = error.message;
   });
 });
-$("metric-select").addEventListener("change", () => settings.set("selectedMetric", $("metric-select").value));
-$("target-type").addEventListener("change", () => {
-  applySuggestedModel();
-  syncTargetForm();
+// --- Metrics to run: a tick and a threshold per metric ------------------------
+async function setChecked(keys) {
+  await settings.set("checkedMetrics", [...keys]);
+}
+
+async function renderThresholds() {
+  const env = await settings.get("thresholdEnv", "default");
+  const thresholds = await settings.get("thresholds", {});
+  const saved = await settings.get("checkedMetrics", null);
+  const known = new Set(state.metrics.map((m) => m.key));
+  state.checked = new Set((saved ?? [...known]).filter((key) => known.has(key)));
+  $("metric-check-count").textContent = `(${state.checked.size} of ${state.metrics.length} ticked)`;
+  updateRunButton();
+  fillSelect($("threshold-env"), THRESHOLD_ENVS.map((e) => ({ value: e.key, label: e.label })), env);
+  $("threshold-table").replaceChildren(
+    ...metricGroups(state.metrics).flatMap((group) => [
+      groupCheckRow(group),
+      ...group.metrics.map((metric) => {
+        const tick = el("input", {
+          type: "checkbox",
+          checked: state.checked.has(metric.key),
+          "aria-label": `Run ${metric.title}`,
+        });
+        tick.addEventListener("change", async () => {
+          const next = new Set(state.checked);
+          if (tick.checked) next.add(metric.key);
+          else next.delete(metric.key);
+          await setChecked(next);
+        });
+        const input = el("input", {
+          type: "number", min: "0", max: "1", step: "0.05",
+          value: String(thresholdFor(metric, thresholds)),
+          "aria-label": `${metric.title} threshold`,
+        });
+        input.addEventListener("change", async () => {
+          const value = Number(input.value);
+          if (!Number.isFinite(value) || value < 0 || value > 1) {
+            input.value = String(thresholdFor(metric, await settings.get("thresholds", {})));
+            return;
+          }
+          const current = await settings.get("thresholds", {});
+          await settings.set("thresholds", { ...current, [metric.key]: value });
+          await settings.set("thresholdEnv", "custom");
+          $("threshold-env").value = "custom";
+        });
+        return el(
+          "label",
+          {
+            className: `threshold-row${state.checked.has(metric.key) ? "" : " unchecked"}`,
+            title: metric.description || "",
+          },
+          tick,
+          el("span", {}, metric.title),
+          el("span", { className: "direction" }, comparator(metric.direction)),
+          input,
+        );
+      }),
+    ]),
+  );
+}
+
+// A group heading with a tick that selects or clears the whole group.
+function groupCheckRow(group) {
+  const keys = group.metrics.map((m) => m.key);
+  const ticked = keys.filter((key) => state.checked.has(key)).length;
+  const tick = el("input", {
+    type: "checkbox",
+    checked: ticked === keys.length,
+    "aria-label": `Run all of ${group.label}`,
+  });
+  tick.indeterminate = ticked > 0 && ticked < keys.length;
+  tick.addEventListener("change", async () => {
+    const next = new Set(state.checked);
+    for (const key of keys) {
+      if (tick.checked) next.add(key);
+      else next.delete(key);
+    }
+    await setChecked(next);
+  });
+  return el("label", { className: "threshold-group" }, tick, `${group.label} (${ticked}/${keys.length})`);
+}
+
+$("check-all-metrics").addEventListener("click", () => setChecked(state.metrics.map((m) => m.key)));
+$("check-no-metrics").addEventListener("click", () => setChecked([]));
+
+$("threshold-env").addEventListener("change", async () => {
+  const env = $("threshold-env").value;
+  if (env === "custom") {
+    $("threshold-details").open = true;
+    await settings.set("thresholdEnv", "custom");
+    return;
+  }
+  // A preset sets every metric; "default" clears them back to the catalog values.
+  const thresholds = env === "default"
+    ? {}
+    : Object.fromEntries(state.metrics.map((m) => [m.key, m.presets[env]]));
+  await settings.set("thresholds", thresholds);
+  await settings.set("thresholdEnv", env);
+  await renderThresholds();
 });
 $("open-dashboard").addEventListener("click", () => chrome.runtime.sendMessage({ type: "OPEN_DASHBOARD" }));
-chrome.tabs.onActivated.addListener(() => trackActiveTab());
-chrome.tabs.onUpdated.addListener((_tabId, _info, tab) => {
-  if (tab.active) trackActiveTab();
-});
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => renderLatest());
 
 settings.onChange((changes) => {
@@ -544,15 +851,20 @@ settings.onChange((changes) => {
       $("status").textContent = error.message;
     });
   }
-  if (changes.selectedMetric && changes.selectedMetric.newValue !== $("metric-select").value) {
-    $("metric-select").value = changes.selectedMetric.newValue;
+  if ((changes.thresholds || changes.thresholdEnv || changes.checkedMetrics) && state.metrics.length) {
+    renderThresholds();
   }
+  if (changes.thresholds && target) renderLatest();
 });
 
 async function loadEverything() {
   await refreshStatus();
   if (!state.backendUp) return false;
   try {
+    // Golden edits and deletes last one session: every fresh load of the
+    // panel starts again from the shipped golden answers.
+    await api("/api/goldens/reset", { method: "POST", body: {} });
+    await loadJudgeSettings();
     await loadMetrics();
     await loadTargets();
     return true;
@@ -562,9 +874,82 @@ async function loadEverything() {
   }
 }
 
+// --- Judge settings: the key, model and base URL the judge uses -------------
+function providerFor(baseUrl) {
+  const option = [...$("judge-provider").options].find((o) => o.dataset.baseUrl === baseUrl);
+  return option ? option.value : "custom";
+}
+
+async function loadJudgeSettings() {
+  const current = await api("/api/judge/settings");
+  $("judge-provider").value = providerFor(current.base_url);
+  $("judge-model").value = current.model;
+  $("judge-base-url").value = current.base_url;
+  $("judge-key").value = "";
+  const source = { panel: "saved here", env: "from the .env file" }[current.key_source];
+  $("judge-key").placeholder = current.has_key ? `${current.key_hint} (leave empty to keep it)` : "paste the judge's API key";
+  $("judge-key-hint").textContent = current.has_key ? `Key ${current.key_hint}, ${source}.` : "No key yet: the judge cannot run.";
+  $("judge-clear-key").classList.toggle("hidden", current.key_source !== "panel");
+  $("judge-summary").textContent = current.has_key ? `· ${current.model}` : "· key missing";
+  // Nothing can be judged without a key, so show the form straight away.
+  if (!current.has_key) $("judge-settings").open = true;
+}
+
+function judgeFormBody() {
+  return {
+    api_key: $("judge-key").value.trim(),
+    model: $("judge-model").value.trim(),
+    base_url: $("judge-base-url").value.trim(),
+  };
+}
+
+function showJudgeResult(ok, text) {
+  $("judge-result").className = ok ? "small status-pass" : "small status-error";
+  $("judge-result").textContent = text;
+}
+
+$("judge-provider").addEventListener("change", () => {
+  const option = $("judge-provider").selectedOptions[0];
+  if (option.dataset.baseUrl) {
+    $("judge-base-url").value = option.dataset.baseUrl;
+    $("judge-model").value = option.dataset.model;
+  }
+});
+
+$("judge-test").addEventListener("click", async () => {
+  showJudgeResult(true, "Asking the judge…");
+  try {
+    const test = await api("/api/judge/settings/test", { method: "POST", body: judgeFormBody() });
+    showJudgeResult(test.ok, test.ok ? `Works: ${test.model} replied.` : test.error);
+  } catch (error) {
+    showJudgeResult(false, error.message);
+  }
+});
+
+$("judge-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/judge/settings", { method: "PUT", body: judgeFormBody() });
+    await loadJudgeSettings();
+    await refreshStatus();
+    showJudgeResult(true, "Saved. The next run uses these settings.");
+  } catch (error) {
+    showJudgeResult(false, error.message);
+  }
+});
+
+armConfirm($("judge-clear-key"), async () => {
+  try {
+    await api("/api/judge/settings", { method: "PUT", body: { ...judgeFormBody(), api_key: "", clear_key: true } });
+    await loadJudgeSettings();
+    await refreshStatus();
+    showJudgeResult(true, "Saved key removed.");
+  } catch (error) {
+    showJudgeResult(false, error.message);
+  }
+});
+
 (async function init() {
-  syncTargetForm();
-  trackActiveTab();
   let loaded = await loadEverything();
   // Keep checking, so the panel recovers once the backend is started.
   setInterval(async () => {

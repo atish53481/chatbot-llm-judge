@@ -10,3 +10,7 @@ node_modules/
 *.tmp
 .venv/
 *.stackdump
+
+# Edited copy of conversations.default.json (reset on every side panel load).
+backend/datasets/conversations.json
+backend/datasets/security_probes.json

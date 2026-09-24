@@ -1,4 +1,5 @@
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -6,9 +7,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.datasets import goldens as goldens_store
-from backend.targets import presets
+from backend.targets.base import ChatReply
 
 EXTENSION_ORIGIN = "chrome-extension://" + "a" * 32
+_REPLY = ChatReply(reply="ok", model="m", mode="http")
 
 
 @pytest.fixture
@@ -30,8 +32,17 @@ def client(app_module):
     return TestClient(app_module.app, base_url="http://127.0.0.1")
 
 
+BOT_CONFIG = {
+    "url": "http://127.0.0.1:9/chat",
+    "headers": {"Content-Type": "application/json"},
+    "body_template": '{"message": "{{message}}"}',
+    "response_path": "reply",
+}
+
+
 def _create_target(client, **overrides):
-    body = {"name": "Sample (mock)", "type": "mock", "config": {}}
+    config = {**BOT_CONFIG, **overrides.pop("config", {})}
+    body = {"name": "Support bot", "type": "http", "config": config}
     body.update(overrides)
     r = client.post("/api/targets", json=body)
     assert r.status_code == 200, r.text
@@ -44,7 +55,7 @@ def _fake_spec(seen_themes):
     metric.is_successful.return_value = True
     metric.reason = "fine"
 
-    def cases(theme="general_support"):
+    def cases(theme="general_support", **_kw):
         seen_themes.append(theme)
         return [{"id": "g1", "theme": theme, "question": "hi",
                  "expected_answer": "hello", "context": []}]
@@ -55,8 +66,8 @@ def _fake_spec(seen_themes):
         threshold=0.7,
         needs=(),
         cases=cases,
-        build_metric=lambda judge: metric,
-        build_case=lambda g, reply: SimpleNamespace(input=g["question"], actual_output=reply),
+        build_metric=lambda judge, threshold=0.7: metric,
+        build_case=lambda g, reply, retrieval=None: SimpleNamespace(input=g["question"], actual_output=reply),
     )
 
 
@@ -73,7 +84,7 @@ def test_status_reports_judge_missing(client, monkeypatch):
 
 def test_create_list_delete_target(client):
     target = _create_target(client)
-    assert target["name"] == "Sample (mock)"
+    assert target["name"] == "Support bot"
     assert any(t["id"] == target["id"] for t in client.get("/api/targets").json())
 
     assert client.delete(f"/api/targets/{target['id']}").status_code == 200
@@ -89,7 +100,7 @@ def test_create_target_rejects_unknown_type_and_bad_http_config(client):
     r = client.post("/api/targets", json={"name": "x", "type": "carrier-pigeon", "config": {}})
     assert r.status_code == 400
     r = client.post("/api/targets", json={"name": "x", "type": "http", "config": {}})
-    assert r.status_code == 400  # base_url missing
+    assert r.status_code == 400  # url missing
     assert len(client.get("/api/targets").json()) == before
 
 
@@ -98,69 +109,12 @@ def test_target_responses_mask_header_values(client):
         client,
         name="OpenAI bot",
         type="http",
-        config={"base_url": "http://127.0.0.1:9",
-                "headers": {"Authorization": "Bearer sk-secret"}},
+        config={"headers": {"Authorization": "Bearer sk-secret"}},
     )
     assert created["config"]["headers"] == {"Authorization": "***"}
     listing = client.get("/api/targets")
     assert "sk-secret" not in listing.text
     assert any(t["id"] == created["id"] for t in listing.json())
-
-
-def test_openai_preset_expands_config_and_hides_key(client):
-    created = _create_target(
-        client,
-        name="GPT bot",
-        type="http",
-        preset="openai_compatible",
-        config={"base_url": "https://api.example.com", "api_key": "sk-live-123",
-                "model": "gpt-4o-mini", "theme": "billing"},
-    )
-    config = created["config"]
-    assert config["request_format"] == "openai_messages"
-    assert config["chat_path"] == "/v1/chat/completions"
-    assert config["model"] == "gpt-4o-mini"
-    assert config["theme"] == "billing"
-    assert config["headers"] == {"Authorization": "***"}
-    assert "api_key" not in config
-    assert "sk-live-123" not in client.get("/api/targets").text
-
-
-def test_commandcode_preset_needs_only_the_key_and_hides_it(client):
-    created = _create_target(
-        client,
-        name="Real bot",
-        type="http",
-        preset="commandcode",
-        config={"api_key": "cmd-live-123", "model": "z-ai/glm-5.3-flash", "theme": "billing"},
-    )
-    config = created["config"]
-    assert config["base_url"] == "https://api.commandcode.ai/provider"
-    assert config["chat_path"] == "/v1/chat/completions"
-    assert config["request_format"] == "openai_messages"
-    assert config["model"] == "z-ai/glm-5.3-flash"
-    assert config["theme"] == "billing"
-    assert config["headers"] == {"Authorization": "***"}
-    assert "cmd-live-123" not in client.get("/api/targets").text
-
-
-def test_commandcode_preset_defaults_the_model(client):
-    created = _create_target(client, name="Real bot", type="http", preset="commandcode",
-                             config={"api_key": "cmd-live-123"})
-    assert created["config"]["model"] == presets.COMMANDCODE_DEFAULT_MODEL
-
-
-def test_preset_rejects_unknown_name_wrong_type_or_missing_key(client):
-    r = client.post("/api/targets", json={"name": "x", "type": "http", "preset": "nope",
-                                          "config": {"base_url": "https://a", "api_key": "k"}})
-    assert r.status_code == 400
-    r = client.post("/api/targets", json={"name": "x", "type": "mock",
-                                          "preset": "openai_compatible", "config": {}})
-    assert r.status_code == 400
-    r = client.post("/api/targets", json={"name": "x", "type": "http",
-                                          "preset": "openai_compatible",
-                                          "config": {"base_url": "https://a"}})
-    assert r.status_code == 400  # api_key missing
 
 
 def test_update_golden_route(client):
@@ -223,7 +177,8 @@ def test_run_uses_target_theme_and_records_one_history_row(client, app_module):
     target = _create_target(client, name="Billing bot", config={"theme": "billing"})
     seen = []
     with patch.object(app_module, "build_judge", return_value=object()), \
-         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": _fake_spec(seen)}):
+         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": _fake_spec(seen)}), \
+         patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY):
         r = client.post("/api/run",
                         json={"target_id": target["id"], "metric_key": "answer_relevancy"})
     assert r.status_code == 200, r.text
@@ -280,7 +235,7 @@ def test_judge_takes_reference_data_from_the_golden_set(client, app_module):
     seen = {}
     spec = _fake_spec([])
     spec.needs = ("expected_answer",)
-    spec.build_case = lambda g, reply: seen.update(g) or SimpleNamespace()
+    spec.build_case = lambda g, reply, retrieval=None: seen.update(g) or SimpleNamespace()
     with patch.object(app_module, "build_judge", return_value=object()), \
          patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": spec}):
         r = client.post("/api/judge", json={
@@ -319,22 +274,6 @@ def test_judge_404s_on_unknown_metric_and_503s_without_a_judge(client, monkeypat
     assert r.status_code == 503
 
 
-def test_relay_round_trip(client, app_module):
-    _create_target(client, name="Web bot", type="dom", config={"session_id": "shop.example"})
-    poll = {"session_id": "shop.example", "wait_seconds": 0}
-    assert client.post("/api/relay/next", json=poll).json() == {"id": None, "question": None}
-    question_id = app_module._relay_queue.ask("shop.example", "What is your refund window?")
-    assert client.post("/api/relay/next", json=poll).json() == {
-        "id": question_id,
-        "question": "What is your refund window?",
-    }
-    r = client.post("/api/relay", json={"session_id": "shop.example",
-                                         "question_id": question_id,
-                                         "text": "7 business days"})
-    assert r.status_code == 200
-    assert app_module._relay_queue.pop("shop.example", question_id, timeout=1) == "7 business days"
-
-
 def test_cors_allows_only_the_extension_origin(client):
     preflight = {"Access-Control-Request-Method": "POST"}
     ok = client.options("/api/targets", headers={"Origin": EXTENSION_ORIGIN, **preflight})
@@ -358,14 +297,12 @@ def test_rejects_foreign_host_header(app_module):
     assert rebinding.get("/api/status").status_code == 400
 
 
-def test_chat_endpoint_talks_to_target(client):
+def test_chat_endpoint_talks_to_target(client, app_module):
     target = _create_target(client)
-    r = client.post("/api/chat", json={"target_id": target["id"],
-                                       "message": "What is your refund window?"})
+    with patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY):
+        r = client.post("/api/chat", json={"target_id": target["id"], "message": "hi"})
     assert r.status_code == 200
-    body = r.json()
-    assert "7 business days" in body["reply"]
-    assert body["mode"] == "mock"
+    assert r.json() == {"reply": "ok", "model": "m", "mode": "http"}
 
 
 def test_chat_returns_404_for_unknown_target(client):
@@ -374,8 +311,7 @@ def test_chat_returns_404_for_unknown_target(client):
 
 
 def test_chat_returns_502_when_target_fails(client, app_module):
-    target = _create_target(client, name="Dead bot", type="http",
-                            config={"base_url": "http://127.0.0.1:9"})
+    target = _create_target(client, name="Dead bot")
     with patch.object(app_module.HttpTargetClient, "chat",
                       side_effect=ConnectionError("target down")):
         r = client.post("/api/chat", json={"target_id": target["id"], "message": "hi"})
@@ -383,31 +319,10 @@ def test_chat_returns_502_when_target_fails(client, app_module):
     assert "target down" in r.json()["detail"]
 
 
-def test_relay_rejects_pages_without_a_web_page_chatbot(client):
-    r = client.post("/api/relay/next", json={"session_id": "stranger.example", "wait_seconds": 0})
-    assert r.status_code == 404
-    r = client.post("/api/relay", json={"session_id": "stranger.example", "question_id": "x", "text": "y"})
-    assert r.status_code == 404
-
-
-def test_relay_next_is_post_only(client):
-    assert client.get("/api/relay/next", params={"session_id": "shop.example"}).status_code == 405
-
-
-def test_dom_target_uses_its_page_host_as_relay_session(client, app_module):
-    target = _create_target(client, name="Web bot 2", type="dom", config={"session_id": "bot.example"})
-    row = app_module.storage.get_target(app_module._conn, target["id"])
-    assert app_module._build_target(row).session_id == "bot.example"
-
-
 def test_chat_forwards_history_to_the_target(client, app_module):
-    from backend.targets.base import ChatReply
-
-    target = _create_target(client, name="API bot", type="http",
-                            config={"base_url": "http://127.0.0.1:9"})
+    target = _create_target(client, name="API bot")
     history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-    reply = ChatReply(reply="ok", model="m", mode="http")
-    with patch.object(app_module.HttpTargetClient, "chat", return_value=reply) as chat:
+    with patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY) as chat:
         r = client.post("/api/chat", json={"target_id": target["id"], "message": "again",
                                            "history": history})
     assert r.status_code == 200
@@ -424,7 +339,8 @@ def test_chat_rejects_unknown_history_roles(client):
 @pytest.mark.parametrize(
     "path, body",
     [
-        ("/api/targets", b'{"name": "x", "type": "mock", "config": {}}'),
+        ("/api/targets", b'{"name": "x", "type": "http", "config": {}}'),
+        ("/api/targets/parse-curl", b'{"curl": "curl https://a.example"}'),
         ("/api/goldens", b'{"theme": "t", "question": "q", "expected_answer": "a"}'),
         ("/api/chat", b'{"target_id": 1, "message": "hi"}'),
         ("/api/run", b'{"target_id": 1, "metric_key": "answer_relevancy"}'),
@@ -436,10 +352,6 @@ def test_posts_without_a_json_content_type_are_refused(client, path, body):
     # refusing those keeps them from driving this API.
     assert client.post(path, content=body).status_code == 422
     assert client.post(path, content=body, headers={"Content-Type": "text/plain"}).status_code == 422
-
-
-def test_sample_chatbot_is_seeded_on_a_new_database(client):
-    assert "Sample chatbot" in [t["name"] for t in client.get("/api/targets").json()]
 
 
 def test_extension_origin_can_be_pinned(app_module):
@@ -504,3 +416,372 @@ def test_list_and_delete_documents(app_module, client):
     assert response.status_code == 200
     listing_after = client.get("/api/documents?theme=general_support").json()
     assert not any(d["id"] == created["id"] for d in listing_after)
+
+
+SHOP_CURL = ("curl 'https://shop.example/api/chat' -H 'content-type: application/json' "
+             "-b 'sid=1' --data-raw '{\"message\":\"Where is my order?\",\"conv\":\"c1\","
+             "\"history\":[{\"role\":\"user\",\"content\":\"Where is my order?\"}]}'")
+
+
+def _http_response(payload):
+    import json as json_module
+    resp = MagicMock(ok=True, status_code=200, headers={"Content-Type": "application/json"})
+    resp.text = json_module.dumps(payload)
+    resp.json.return_value = payload
+    return resp
+
+
+def test_parse_curl_detects_message_history_and_reply_path(client):
+    answer = _http_response({"reply": "It ships tomorrow.", "mode": "live"})
+    with patch("backend.targets.http_client.requests.request", return_value=answer) as sent:
+        r = client.post("/api/targets/parse-curl", json={"curl": SHOP_CURL})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["url"] == "https://shop.example/api/chat"
+    assert body["method"] == "POST"
+    assert body["headers"]["Cookie"] == "sid=1"
+    assert body["sample_message"] == "Where is my order?"
+    assert body["message_marked"] is True
+    import json as json_module
+    assert json_module.loads(body["body_template"]) == {
+        "message": "{{message}}", "conv": "c1", "history": []}
+    assert body["response_path"] == "reply"
+    assert body["reply_preview"] == "It ships tomorrow."
+    assert body["probe_error"] is None
+    # The probe asks the captured question, so the site sees a normal request.
+    assert b"Where is my order?" in sent.call_args.kwargs["data"]
+
+
+def test_parse_curl_still_fills_fields_when_probe_fails(client):
+    with patch("backend.targets.http_client.requests.request", side_effect=ConnectionError("down")):
+        r = client.post("/api/targets/parse-curl", json={"curl": SHOP_CURL})
+    body = r.json()
+    assert body["message_marked"] is True
+    assert body["response_path"] == ""
+    assert "down" in body["probe_error"]
+
+
+def test_parse_curl_rejects_garbage(client):
+    r = client.post("/api/targets/parse-curl", json={"curl": "wget https://a.example"})
+    assert r.status_code == 400
+
+
+def test_test_endpoint_reports_reply_or_error(client, app_module):
+    with patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY):
+        r = client.post("/api/targets/test", json={"config": BOT_CONFIG, "message": "hi"})
+    assert r.json() == {"ok": True, "reply": "ok"}
+    with patch.object(app_module.HttpTargetClient, "chat", side_effect=ValueError("HTTP 403")):
+        r = client.post("/api/targets/test", json={"config": BOT_CONFIG})
+    assert r.json()["ok"] is False and "HTTP 403" in r.json()["error"]
+    r = client.post("/api/targets/test", json={"config": {"url": "http://a.example"}})
+    assert r.status_code == 400  # no {{message}} placeholder
+
+
+def test_edit_without_headers_keeps_the_stored_ones(client, app_module):
+    target = _create_target(client, config={"headers": {"Cookie": "secret=1"}})
+    config = {k: v for k, v in BOT_CONFIG.items() if k != "headers"}
+    r = client.put(f"/api/targets/{target['id']}",
+                   json={"name": "Renamed", "type": "http", "config": config})
+    assert r.status_code == 200, r.text
+    stored = app_module.storage.get_target(app_module._conn, target["id"])
+    assert stored["config"]["headers"] == {"Cookie": "secret=1"}
+
+
+def test_run_uses_the_requested_threshold(client, app_module):
+    target = _create_target(client)
+    spec = _fake_spec([])
+    seen_thresholds = []
+    spec.build_metric = lambda judge, threshold=0.7: seen_thresholds.append(threshold) or MagicMock(
+        score=0.8, reason="", is_successful=lambda: 0.8 >= threshold)
+    with patch.object(app_module, "build_judge", return_value=object()), \
+         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": spec}), \
+         patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY):
+        r = client.post("/api/run", json={"target_id": target["id"],
+                                          "metric_key": "answer_relevancy", "threshold": 0.9})
+    assert seen_thresholds == [0.9]
+    assert r.json()["threshold"] == 0.9
+    assert r.json()["status"] == "fail"
+    r = client.post("/api/run", json={"target_id": target["id"],
+                                      "metric_key": "answer_relevancy", "threshold": 1.5})
+    assert r.status_code == 422
+
+
+def test_run_reports_progress_while_it_works(client, app_module):
+    target = _create_target(client)
+    seen = []
+
+    def chat(message, history=None):
+        seen.append(dict(app_module._progress["run-1"]))
+        return _REPLY
+
+    with patch.object(app_module, "build_judge", return_value=object()), \
+         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": _fake_spec([])}), \
+         patch.object(app_module.HttpTargetClient, "chat", side_effect=chat):
+        r = client.post("/api/run", json={"target_id": target["id"],
+                                          "metric_key": "answer_relevancy", "run_id": "run-1"})
+    assert r.status_code == 200, r.text
+    assert seen == [{"done": 0, "total": 1, "phase": "chat", "question": "hi"}]
+    assert client.get("/api/run/progress", params={"run_id": "run-1"}).json() == {"active": False}
+
+
+def test_cancel_stops_a_run_and_records_nothing(client, app_module):
+    target = _create_target(client)
+    spec = _fake_spec([])
+    spec.cases = lambda theme="general_support", **_kw: [
+        {"id": f"g{i}", "theme": theme, "question": f"q{i}", "expected_answer": "a", "context": []}
+        for i in range(3)
+    ]
+    asked = []
+
+    def chat(message, history=None):
+        asked.append(message)
+        # The user presses Stop while the first answer is on its way.
+        assert client.post("/api/run/cancel", json={"run_id": "run-2"}).json() == {"cancelling": True}
+        return _REPLY
+
+    with patch.object(app_module, "build_judge", return_value=object()), \
+         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": spec}), \
+         patch.object(app_module.HttpTargetClient, "chat", side_effect=chat):
+        r = client.post("/api/run", json={"target_id": target["id"],
+                                          "metric_key": "answer_relevancy", "run_id": "run-2"})
+    body = r.json()
+    assert body["status"] == "cancelled"
+    assert body["error"] == "stopped after 0 of 3 cases"
+    assert asked == ["q0"]
+    assert client.get("/api/history", params={
+        "target_id": target["id"], "metric_key": "answer_relevancy"}).json() == []
+    assert client.post("/api/run/cancel", json={"run_id": "run-2"}).json() == {"cancelling": False}
+    app_module._cancelled.discard("run-2")
+
+
+def test_stop_pressed_before_the_run_reports_still_stops_it(client, app_module):
+    target = _create_target(client)
+    assert client.post("/api/run/cancel", json={"run_id": "run-3"}).json() == {"cancelling": False}
+    with patch.object(app_module, "build_judge", return_value=object()), \
+         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": _fake_spec([])}), \
+         patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY) as chat:
+        r = client.post("/api/run", json={"target_id": target["id"],
+                                          "metric_key": "answer_relevancy", "run_id": "run-3"})
+    assert r.json()["status"] == "cancelled"
+    chat.assert_not_called()
+    assert "run-3" not in app_module._cancelled
+
+
+def test_reset_restores_shipped_goldens_and_keeps_other_themes(client):
+    shipped = client.get("/api/goldens", params={"theme": "general_support"}).json()
+    assert len(shipped) == 10
+    client.delete(f"/api/goldens/{shipped[0]['id']}")
+    client.put(f"/api/goldens/{shipped[1]['id']}", json={
+        "theme": "general_support", "question": "edited?", "expected_answer": "edited"})
+    client.post("/api/goldens", json={"theme": "general_support", "question": "extra?",
+                                      "expected_answer": "extra"})
+    client.post("/api/goldens", json={"theme": "my_bot", "question": "mine?",
+                                      "expected_answer": "kept"})
+
+    r = client.post("/api/goldens/reset", json={})
+    assert r.status_code == 200
+    restored = client.get("/api/goldens", params={"theme": "general_support"}).json()
+    assert restored == shipped
+    assert [g["question"] for g in client.get("/api/goldens", params={"theme": "my_bot"}).json()] == ["mine?"]
+    # Like every POST here, it needs a JSON body, so other sites cannot trigger it.
+    assert client.post("/api/goldens/reset").status_code == 422
+
+
+def test_judge_settings_saved_from_the_panel_override_env(client, app_module, monkeypatch):
+    monkeypatch.setenv("JUDGE_MODEL", "env-model")
+    before = client.get("/api/judge/settings").json()
+    assert before["key_source"] == "env" and before["model"] == "env-model"
+
+    r = client.put("/api/judge/settings", json={
+        "api_key": "sk-panel-secret-1234", "model": "panel-model",
+        "base_url": "https://api.example.com/v1"})
+    assert r.status_code == 200
+    saved = r.json()
+    assert saved == {"model": "panel-model", "base_url": "https://api.example.com/v1",
+                     "has_key": True, "key_hint": "••••1234", "key_source": "panel"}
+    assert "sk-panel-secret" not in client.get("/api/judge/settings").text
+    assert client.get("/api/status").json()["judge"] == {"model": "panel-model", "up": True}
+
+    # Runs use the saved values.
+    with patch.object(app_module, "build_judge", return_value=object()) as build, \
+         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": _fake_spec([])}), \
+         patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY):
+        target = _create_target(client)
+        client.post("/api/run", json={"target_id": target["id"], "metric_key": "answer_relevancy"})
+    build.assert_called_once_with(api_key="sk-panel-secret-1234", model="panel-model",
+                                  base_url="https://api.example.com/v1")
+
+    # An empty key keeps the saved one; empty model / URL fall back to .env.
+    kept = client.put("/api/judge/settings", json={"api_key": "", "model": "", "base_url": ""}).json()
+    assert kept["key_source"] == "panel" and kept["model"] == "env-model"
+    cleared = client.put("/api/judge/settings", json={"clear_key": True}).json()
+    assert cleared["key_source"] == "env"
+    assert client.put("/api/judge/settings", json={"base_url": "ftp://x"}).status_code == 400
+
+
+def test_judge_settings_test_reports_the_reply_or_the_error(client, app_module):
+    judge = MagicMock()
+    judge.generate.return_value = ('{"ok": true}', 0.0)
+    with patch.object(app_module, "build_judge", return_value=judge) as build:
+        r = client.post("/api/judge/settings/test", json={"api_key": "sk-try", "model": "m"})
+    assert r.json() == {"ok": True, "model": "m", "reply": '{"ok": true}'}
+    assert build.call_args.kwargs["api_key"] == "sk-try"
+    judge.generate.side_effect = RuntimeError("401 invalid key")
+    with patch.object(app_module, "build_judge", return_value=judge):
+        r = client.post("/api/judge/settings/test", json={})
+    assert r.json()["ok"] is False and "401 invalid key" in r.json()["error"]
+
+
+def test_conversation_scenarios_crud_and_reset(client):
+    shipped = client.get("/api/conversations", params={"theme": "general_support"}).json()
+    assert len(shipped) == 3
+
+    created = client.post("/api/conversations", json={
+        "theme": "general_support", "name": "Gift card", "expected_outcome": "Explains balance",
+        "user_turns": ["I have a gift card.", " ", "What's the balance on code ABC?"]}).json()
+    assert created["user_turns"] == ["I have a gift card.", "What's the balance on code ABC?"]
+    edited = client.put(f"/api/conversations/{created['id']}", json={
+        "theme": "general_support", "name": "Gift card v2", "user_turns": ["Hi"]}).json()
+    assert edited["name"] == "Gift card v2"
+    assert client.delete(f"/api/conversations/{shipped[0]['id']}").status_code == 200
+    assert client.delete(f"/api/conversations/{shipped[0]['id']}").status_code == 404
+    assert client.post("/api/conversations", json={
+        "theme": "t", "name": "x", "user_turns": [" "]}).status_code == 400
+    client.post("/api/conversations", json={"theme": "my_bot", "name": "mine", "user_turns": ["hey"]})
+
+    assert client.post("/api/conversations/reset", json={}).json() == {"restored": 3}
+    assert client.get("/api/conversations", params={"theme": "general_support"}).json() == shipped
+    assert [c["name"] for c in client.get("/api/conversations", params={"theme": "my_bot"}).json()] == ["mine"]
+    # The panel-load reset restores scenarios along with the goldens.
+    client.delete(f"/api/conversations/{shipped[1]['id']}")
+    assert client.post("/api/goldens/reset", json={}).json()["conversations_restored"] == 3
+    assert len(client.get("/api/conversations", params={"theme": "general_support"}).json()) == 3
+
+
+def test_metrics_include_card_copy_and_cases_available(client):
+    target = _create_target(client, config={"theme": "no_such_theme", "persona": "Shop bot"})
+    rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={target['id']}").json()}
+    assert len(rows) == 24
+    assert rows["answer_relevancy"]["cases_available"] == 0
+    assert rows["prompt_injection"]["cases_available"] == 2
+    assert rows["prompt_injection"]["dataset"] == "security_probes"
+    assert rows["jailbreak"]["ui_category"] == "security"
+    assert rows["bias"]["scale_hint"].startswith("0.00")
+    assert rows["answer_relevancy"]["question"].endswith("?")
+
+
+def test_metrics_without_target_still_list_cases(client):
+    rows = {m["key"]: m for m in client.get("/api/metrics").json()}
+    assert rows["answer_relevancy"]["cases_available"] > 0
+
+
+def test_metrics_for_unknown_target_is_404(client):
+    assert client.get("/api/metrics?target_id=999999").status_code == 404
+
+
+def test_target_persona_round_trips(client):
+    target = _create_target(client, config={"persona": "Shop bot"})
+    listed = next(t for t in client.get("/api/targets").json() if t["id"] == target["id"])
+    assert listed["config"]["persona"] == "Shop bot"
+
+
+def test_run_rejects_zero_limit(client):
+    target = _create_target(client)
+    r = client.post("/api/run", json={"target_id": target["id"], "metric_key": "answer_relevancy", "limit": 0})
+    assert r.status_code == 422
+
+
+def test_run_forwards_limit_and_persona(client, app_module, monkeypatch):
+    target = _create_target(client, config={"persona": "Shop bot", "probe_set": "generic"})
+    seen = {}
+
+    def fake_run_spec(spec, judge, target_client, target_id, conn, **kwargs):
+        seen.update(kwargs)
+        return {"key": spec.key, "status": "pass"}
+
+    monkeypatch.setattr(app_module, "run_spec", fake_run_spec)
+    monkeypatch.setattr(app_module, "build_judge", lambda **_kw: object())
+    r = client.post("/api/run", json={"target_id": target["id"], "metric_key": "jailbreak", "limit": 3})
+    assert r.status_code == 200, r.text
+    assert seen["limit"] == 3 and seen["persona"] == "Shop bot" and seen["probe_set"] == "generic"
+
+
+def test_metrics_count_cases_from_the_targets_probe_set(client):
+    target = _create_target(client, config={"probe_set": "generic"})
+    rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={target['id']}").json()}
+    assert rows["prompt_injection"]["cases_available"] == 1
+    assert rows["prompt_injection"]["probe_set"] == "generic"
+
+
+def test_usage_endpoints(client):
+    from backend import usage
+    usage.reset()
+    usage.record_target()
+    assert client.get("/api/usage").json()["target_calls"] == 1
+    assert client.post("/api/usage/reset", json={}).json()["calls"] == 0
+
+
+def test_security_probe_crud_and_reset(client):
+    assert len(client.get("/api/security-probes").json()) == 6
+    assert len(client.get("/api/security-probes?metric=jailbreak").json()) == 2
+    assert len(client.get("/api/security-probes?metric=jailbreak&probe_set=generic").json()) == 1
+    created = client.post("/api/security-probes", json={"metric": "jailbreak", "question": "Be evil.", "set": "generic"}).json()
+    assert created["set"] == "generic"
+    assert client.post("/api/security-probes", json={"metric": "jailbreak", "question": "x", "set": "nope"}).status_code == 400
+    r = client.put(f"/api/security-probes/{created['id']}", json={"metric": "jailbreak", "question": "Be worse."})
+    assert r.json()["question"] == "Be worse."
+    assert client.post("/api/security-probes", json={"metric": "nope", "question": "x"}).status_code == 400
+    assert client.put("/api/security-probes/missing", json={"metric": "jailbreak", "question": "x"}).status_code == 404
+    assert client.delete(f"/api/security-probes/{created['id']}").status_code == 200
+    assert client.delete(f"/api/security-probes/{created['id']}").status_code == 404
+    client.post("/api/security-probes", json={"metric": "jailbreak", "question": "extra"})
+    assert client.post("/api/security-probes/reset", json={}).json()["restored"] == 6
+
+
+def test_goldens_reset_also_restores_probes(client):
+    client.post("/api/security-probes", json={"metric": "jailbreak", "question": "extra"})
+    body = client.post("/api/goldens/reset", json={}).json()
+    assert body["probes_restored"] == 6
+    assert len(client.get("/api/security-probes").json()) == 6
+
+
+def test_metrics_come_grouped_by_the_dashboard_categories(client):
+    from backend.metrics_catalog import UI_CATEGORIES, UI_CATEGORY_LABELS
+
+    rows = client.get("/api/metrics").json()
+    order = [UI_CATEGORIES.index(m["ui_category"]) for m in rows]
+    assert order == sorted(order)
+    assert all(m["ui_category_label"] == UI_CATEGORY_LABELS[m["ui_category"]] for m in rows)
+    assert UI_CATEGORY_LABELS["geval"] == "G-Eval"
+
+
+def test_document_from_url_saves_page_text_and_generates(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    monkeypatch.setattr(app_module, "fetch_page_text",
+                        lambda url: ("Lost cards are blocked within 5 minutes.", "https://help.example/card"))
+    with patch.object(app_module, "generate_goldens_from_document", return_value=4) as mock_gen:
+        r = client.post("/api/documents/url", json={"theme": "bank_support", "url": "https://help.example/c"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["goldens_created"] == 4 and body["status"] == "ready"
+    assert body["filename"] == "https://help.example/card"
+    path, theme, source, _judge = mock_gen.call_args.args
+    assert theme == "bank_support" and source == "https://help.example/card"
+    saved = Path(path)
+    assert saved.parent == tmp_path / "bank_support" and saved.name.endswith("_help.example.txt")
+    assert saved.read_text(encoding="utf-8") == "Lost cards are blocked within 5 minutes."
+
+
+def test_document_from_url_reports_unusable_pages(app_module, client, monkeypatch):
+    def refuse(url):
+        raise ValueError("the page has almost no readable text")
+
+    monkeypatch.setattr(app_module, "fetch_page_text", refuse)
+    r = client.post("/api/documents/url", json={"theme": "bank_support", "url": "https://help.example/spa"})
+    assert r.status_code == 400
+    assert "readable text" in r.json()["detail"]
+
+
+def test_document_from_url_rejects_unsafe_theme(client):
+    r = client.post("/api/documents/url", json={"theme": "../evil", "url": "https://help.example"})
+    assert r.status_code == 422

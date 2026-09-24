@@ -8,12 +8,11 @@ How a judged answer travels from a click in the side panel to a score on the cha
 |---|---|---|
 | Side panel | `ChatbotExtension/sidebar/` | Primary UI: manage chatbots and goldens, run a metric, see the latest scores. |
 | Dashboard tab | `ChatbotExtension/dashboard/` | Chat with the chatbot; latest / trend / case-by-case views. |
-| Service worker | `ChatbotExtension/background.js` | Opens the views; forwards relay traffic (a page cannot fetch `127.0.0.1`). |
-| Content script | `ChatbotExtension/content_script.js` | Drives a chatbot web page: types questions, reads replies. |
+| Service worker | `ChatbotExtension/background.js` | Opens the side panel and the dashboard tab. |
 | Backend | `backend/dashboard/app.py` | FastAPI control plane on `http://127.0.0.1:8000`. |
 | Judge | `backend/judges/judge.py` | The scoring model — never the chatbot under test. |
-| Metrics catalog | `backend/metrics_catalog.py` | The 7 metrics, their cases and the 0.7 threshold. |
-| Storage | `backend/storage.py` | SQLite (`judge.db`): targets, run history, seed flag. |
+| Metrics catalog | `backend/metrics_catalog.py` | The 24 metrics in 6 groups (incl. 8 Security red-team metrics): direction (≥ / ≤), default threshold, environment presets, what each scores on. |
+| Storage | `backend/storage.py` | SQLite (`judge.db`): targets, run history, documents, judge settings. |
 | Goldens | `backend/datasets/goldens.json` | Question / expected-answer sets by theme. |
 
 ```
@@ -21,7 +20,6 @@ How a judged answer travels from a click in the side panel to a score on the cha
               ├── fetch ──► FastAPI (127.0.0.1:8000) ──► judge model (remote API)
  dashboard ───┘                    │
                                    └──► SQLite judge.db (targets, runs)
- chatbot web page ── content script ── service worker ──► relay endpoints
 ```
 
 ## 1. Startup
@@ -29,35 +27,48 @@ How a judged answer travels from a click in the side panel to a score on the cha
 1. `run-backend.bat` creates `.venv` on first use, installs `requirements.txt`, then
    starts uvicorn. `.env` supplies `JUDGE_API_KEY` (and optional `JUDGE_MODEL`,
    `JUDGE_BASE_URL`, `JUDGE_DB_PATH`).
-2. On import, `backend/dashboard/app.py` opens `judge.db`, creates the tables, and
-   seeds the *Sample chatbot* once (`storage.seed_sample_target_once`).
+2. On import, `backend/dashboard/app.py` opens `judge.db` and creates the tables.
+   `storage.init_db` also migrates older HTTP chatbots to the cURL-template config and
+   drops retired sample (`mock`) and web-page (`dom`) chatbots.
 3. The extension loads from `ChatbotExtension/`. The side panel calls `/api/status`,
    which reports the judge model name and whether a key is configured.
 
 ## 2. Adding a chatbot (target)
 
-`POST /api/targets` with `{name, type, config, preset?}`. `type` is one of:
+The only connector is a request captured from the chatbot's own website
+(`backend/targets/http_client.py`). The side panel:
 
-- **`mock`** — canned answers for the sample; needs no setup.
-- **`http` + `commandcode` preset** — a real model served by Command Code's Provider
-  API (`https://api.commandcode.ai/provider/v1`). Only `api_key` is required; the
-  preset fills the endpoint, request shape and default model
-  (`z-ai/glm-5.3-flash`). The endpoint serves open models (glm, qwen, deepseek,
-  minimax); Anthropic ids live on `/v1/messages` and `openai/*` ids are rejected.
-- **`http` + `openai_compatible` preset** — calls any OpenAI-chat-completions API
-  from `{base_url, api_key, model}`.
-- **`http`** — a hand-configured API: chat path, message field, and the dotted path
-  to the reply (`backend/targets/http_client.py`).
-- **`dom`** — a chatbot web page with no API. The side panel requests site access,
-  injects `content_script.js` into the active tab, and stores
-  `config.session_id = <hostname>`.
+1. `POST /api/targets/parse-curl {curl, sample_message?, probe?}` — runs when the user
+   pastes. `targets/curl.py` parses a *Copy as cURL (bash)* command into
+   `{url, method, headers, body_template}`. `prepare_body` / `prepare_url` find the
+   question (`sample_message` if given; else by key name — `message`, `prompt`,
+   `query`, … — the last user turn of a `messages` list, or the longest text) and swap
+   it for `{{message}}`, emptying `history`-style arrays and cutting `messages` to
+   system + last user turn. With `probe` (default on) the captured question is sent
+   once and `find_reply_path` / `find_stream_reply_path` locate the reply; the result
+   carries `sample_message`, `response_path`, `reply_preview` and `probe_error`.
+2. `POST /api/targets/test {config, message, target_id?}` — sends one question with
+   the unsaved config and returns `{ok, reply}` or `{ok: false, error}` (the error
+   carries the HTTP status and a preview of the response, to help pick the reply path).
+3. `POST /api/targets` / `PUT /api/targets/{id}` with
+   `{name, type: "http", config: {url, method, headers, body_template, response_path, theme}}`.
+
+At chat time `{{message}}` is filled JSON-escaped into the body (URL-encoded for a
+form body, percent-encoded in the URL). `Content-Length`, `Host` and
+`Accept-Encoding` from the capture are dropped. The reply is read at `response_path`
+from JSON, joined across `data:` events for a `text/event-stream` reply, or taken as
+the whole text when the path is empty. Golden questions are asked on their own;
+multi-turn scenarios send the conversation so far into the body's history slot
+(`history_path`, e.g. `history` or `messages`).
 
 The backend builds the client once at create time, so a broken config is rejected
-with a 400 before it is stored. Responses mask secret header values as `***`.
+with a 400 before it is stored. Responses mask secret header values as `***`; an edit that sends no `headers`
+keeps the stored ones.
 
 ## 3. Running one metric
 
-`POST /api/run {target_id, metric_key}` → `backend/dashboard/runner.py:run_spec`:
+`POST /api/run {target_id, metric_key, threshold?, run_id?, limit?}` → `backend/dashboard/runner.py:run_spec`
+(`limit` = the dashboard's **Cases per run**; the target's `persona` is passed along for the Security probes):
 
 1. `spec.cases(theme)` loads the chatbot's golden set from `goldens.json`
    (`goldens_with_context` keeps only rows that carry context).
@@ -66,31 +77,34 @@ with a 400 before it is stored. Responses mask secret header values as `***`.
 3. For each golden: `target.chat(question)` gets the chatbot's reply, the metric
    measures `spec.build_case(golden, reply)`, and the case's score, pass flag and
    reason are collected.
-4. The run's **average** score and overall pass flag are written as **one** row in
-   `runs` (`storage.record_run`) — the charts plot run averages, not cases.
+4. The run's **average** score is written as **one** row in `runs`
+   (`storage.record_run`) — the charts plot run averages, not cases. The run passes
+   when that average meets the threshold (≥ for most metrics, ≤ for violation rates).
+   Each case row carries `input`, `actual_output`, `expected_output`, `context`
+   (with `context_source`: chatbot or golden), `score`, `passed` and `reason`.
 5. The response carries `status`, `score`, `threshold`, `reason`, and per-case
    `rows` for the case table.
 
 Failures are returned as `status: "error"` with a message (broken dataset, empty
 dataset, target/judge exception) rather than raising.
 
-## 4. Web-page relay (`dom` targets)
+### Security metrics
 
-For chatbots that only exist in a browser page, the side panel cannot talk to them
-directly — an `https` page cannot fetch `http://127.0.0.1`. So:
+Each Security metric (Prompt Injection, Jailbreak, Encoded Injection, Data Exfiltration,
+Social Engineering, Domain Misuse, Non-Advice, Role Violation) sends its probes from
+`security_probes.json` (shipped: `security_probes.default.json`, restored by the goldens
+reset) to the chatbot. Each case's context is the target's **Chatbot role** (`persona`),
+or a note telling the judge to use the role the bot claims; G-Eval scores 1.0 when the
+reply resisted the attack.
 
-1. The user clicks the page's message box, then its Send button (or Esc so the
-   script synthesizes Enter), then the area where replies appear.
-2. `content_script.js` polls `/api/relay/next` (long-poll) through the service
-   worker every second.
-3. For each question it sets the text (React-safe native setter, or
-   `execCommand("insertText")`), submits, and waits for the reply area to settle
-   (~1.5 s quiet) before reading the appended text.
-4. The reply is sent to `POST /api/relay`; `runner.run_spec` receives it as the
-   chatbot's answer via `DomRelayTargetClient`.
+### Dashboard: Run all visible
 
-`/api/relay*` rejects unknown sessions (404); sessions are matched against stored
-`dom` targets by hostname.
+The category chips filter the cards; **Run all visible** runs every shown card that has
+cases, one `/api/run` at a time (with `limit` from **Cases per run**), polling
+`/api/run/progress` for the status line and `/api/usage` every 2 s for the **Tokens
+used** tile. **Stop** calls `/api/run/cancel` and skips the remaining cards. The
+**Average score** tile averages the latest score of each shown card, counting
+lower-is-better metrics as 1 − score; a finished batch reports its own average too.
 
 ## 5. Chat (dashboard)
 
@@ -149,9 +163,9 @@ Ad-hoc scores are **not stored**, so the trend charts stay a record of golden-se
 | Add or retune a metric | `backend/metrics_catalog.py` (one `MetricSpec`, then `ALL_SPECS`) |
 | What a metric needs to score | `MetricSpec.needs` in `backend/metrics_catalog.py` |
 | Single-answer judging | `judge_one` in `backend/dashboard/runner.py`, `POST /api/judge` |
-| Pass threshold | `PASS_THRESHOLD` in `backend/metrics_catalog.py` |
+| Pass threshold | default: `PASS_THRESHOLD` in `backend/metrics_catalog.py`; per metric: the threshold next to its tick box under **Metrics to run** in the side panel, or a **Thresholds for** preset (`threshold` on `/api/run` and `/api/judge`) |
 | Judge model / provider | `.env`: `JUDGE_MODEL`, `JUDGE_BASE_URL`, `JUDGE_API_KEY` |
-| Golden answers | side panel (`POST` / `PUT` / `DELETE` on `/api/goldens`), or `backend/datasets/goldens.json` |
-| HTTP request shape | `backend/targets/http_client.py`, `backend/targets/presets.py` |
-| Relay timing | `POLL_MS` / `SETTLE_MS` / `REPLY_TIMEOUT_MS` in `ChatbotExtension/content_script.js`; `DEFAULT_TIMEOUT` in `backend/targets/dom_relay.py`; `RELAY_WAIT_SECONDS` in `backend/dashboard/app.py` |
+| Golden answers | side panel (`POST` / `PUT` / `DELETE` on `/api/goldens`; reset to defaults on every panel load via `POST /api/goldens/reset`) |
+| Default golden answers | `backend/datasets/goldens.default.json` |
+| HTTP request / reply handling | `backend/targets/http_client.py`; cURL parsing in `backend/targets/curl.py` |
 | API surface | `backend/dashboard/app.py` |

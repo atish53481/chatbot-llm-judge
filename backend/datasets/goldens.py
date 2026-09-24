@@ -13,6 +13,9 @@ import threading
 import uuid
 
 GOLDENS_PATH = os.path.join(os.path.dirname(__file__), "goldens.json")
+# The shipped golden sets. The side panel restores them on every load, so edits
+# and deletes last one session (see reset_to_defaults).
+DEFAULT_GOLDENS_PATH = os.path.join(os.path.dirname(__file__), "goldens.default.json")
 _LOCK = threading.RLock()
 
 
@@ -31,6 +34,20 @@ def _write_all(rows: list[dict]) -> None:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise
+
+
+def reset_to_defaults() -> int:
+    """Puts every shipped theme back to its default goldens; returns how many.
+
+    Themes that are not shipped (a chatbot's own golden set) are left as they are.
+    """
+    with open(DEFAULT_GOLDENS_PATH, "r", encoding="utf-8") as f:
+        defaults = json.load(f)
+    shipped = {row["theme"] for row in defaults}
+    with _LOCK:
+        kept = [row for row in _read_all() if row["theme"] not in shipped]
+        _write_all(defaults + kept)
+    return len(defaults)
 
 
 def load_goldens(theme: str | None = None) -> list[dict]:

@@ -5,7 +5,7 @@ import pytest
 
 from backend import storage
 from backend.dashboard.runner import judge_one, run_spec
-from backend.targets.mock import MockTargetClient
+from tests.fakes import CannedChatbot
 
 
 def _fake_metric(scores, passes):
@@ -24,7 +24,7 @@ def _fake_metric(scores, passes):
 
 
 def _fake_spec(cases, metric, seen_themes=None, needs=()):
-    def load(theme="general_support"):
+    def load(theme="general_support", **_kw):
         if seen_themes is not None:
             seen_themes.append(theme)
         return cases
@@ -35,8 +35,8 @@ def _fake_spec(cases, metric, seen_themes=None, needs=()):
         threshold=0.7,
         needs=needs,
         cases=load,
-        build_metric=lambda judge: metric,
-        build_case=lambda g, reply: SimpleNamespace(input=g["question"], actual_output=reply),
+        build_metric=lambda judge, threshold=0.7: metric,
+        build_case=lambda g, reply, retrieval=None: SimpleNamespace(input=g["question"], actual_output=reply),
     )
 
 
@@ -47,13 +47,13 @@ def _case(question):
 
 def _db(tmp_path):
     conn = storage.init_db(str(tmp_path / "t.db"))
-    return conn, storage.add_target(conn, "mock", "mock", {})
+    return conn, storage.add_target(conn, "bot", "http", {})
 
 
 def test_run_spec_success_records_one_run_row(tmp_path):
     conn, target_id = _db(tmp_path)
     spec = _fake_spec([_case("What is your refund window?")], _fake_metric([0.9], [True]))
-    result = run_spec(spec, judge=object(), target=MockTargetClient(), target_id=target_id, conn=conn)
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
 
     assert result["status"] == "pass"
     assert result["score"] == 0.9
@@ -69,24 +69,43 @@ def test_run_spec_success_records_one_run_row(tmp_path):
 
 def test_run_spec_records_average_of_all_cases_as_one_row(tmp_path):
     conn, target_id = _db(tmp_path)
-    spec = _fake_spec([_case("q1"), _case("q2")], _fake_metric([0.9, 0.5], [True, False]))
-    result = run_spec(spec, judge=object(), target=MockTargetClient(), target_id=target_id, conn=conn)
+    spec = _fake_spec([_case("q1"), _case("q2")], _fake_metric([0.9, 0.4], [True, False]))
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
 
-    assert result["status"] == "fail"
-    assert result["score"] == pytest.approx(0.7)
+    assert result["status"] == "fail"  # average 0.65 is below 0.7
+    assert result["score"] == pytest.approx(0.65)
     assert result["cases_run"] == 2
     assert result["reason"] == "reason 1"  # first failing case's reason
     history = storage.history(conn, target_id, "fake_metric")
     assert len(history) == 1
-    assert history[0]["score"] == pytest.approx(0.7)
+    assert history[0]["score"] == pytest.approx(0.65)
     assert history[0]["passed"] == 0
+
+
+def test_run_passes_on_its_average_even_if_one_case_fails(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("q1"), _case("q2")], _fake_metric([0.9, 0.5], [True, False]))
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
+
+    assert result["status"] == "pass"  # average 0.7 meets >= 0.7
+    assert [r["passed"] for r in result["rows"]] == [True, False]
+
+
+def test_lower_metric_passes_when_average_is_at_or_below(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("q1"), _case("q2")], _fake_metric([1.0, 0.6], [True, False]))
+    spec.direction = "lower"
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id,
+                      conn=conn, threshold=0.2)
+    assert result["score"] == pytest.approx(0.2)  # violation rates 0.0 and 0.4
+    assert result["status"] == "pass"
 
 
 def test_run_spec_passes_theme_to_dataset(tmp_path):
     conn, target_id = _db(tmp_path)
     seen = []
     spec = _fake_spec([_case("q1")], _fake_metric([0.8], [True]), seen_themes=seen)
-    result = run_spec(spec, judge=object(), target=MockTargetClient(),
+    result = run_spec(spec, judge=object(), target=CannedChatbot(),
                       target_id=target_id, conn=conn, theme="billing")
     assert seen == ["billing"]
     assert result["theme"] == "billing"
@@ -95,7 +114,7 @@ def test_run_spec_passes_theme_to_dataset(tmp_path):
 def test_run_spec_reports_error_on_empty_dataset(tmp_path):
     conn, target_id = _db(tmp_path)
     spec = _fake_spec([], _fake_metric([], []))
-    result = run_spec(spec, judge=object(), target=MockTargetClient(), target_id=target_id, conn=conn)
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
     assert result["status"] == "error"
     assert "empty" in result["error"]
     assert storage.history(conn, target_id, "fake_metric") == []
@@ -125,7 +144,11 @@ def test_judge_one_scores_a_single_answer():
     assert result["error"] is None
     assert result["rows"] == [{
         "question": "What is your refund window?",
+        "input": "What is your refund window?",
         "actual_output": "Refunds within 7 business days.",
+        "expected_output": "",
+        "context": None,
+        "context_source": None,
         "score": 0.42,
         "passed": False,
         "reason": "reason 0",
@@ -145,7 +168,7 @@ def test_judge_one_reports_a_missing_required_input():
 def test_judge_one_hands_reference_data_to_the_case():
     seen = {}
     spec = _fake_spec([], _fake_metric([1.0], [True]), needs=("context", "expected_answer"))
-    spec.build_case = lambda g, reply: seen.update(g) or SimpleNamespace()
+    spec.build_case = lambda g, reply, retrieval=None: seen.update(g) or SimpleNamespace()
 
     judge_one(spec, judge=object(), question="q", actual_output="a",
               expected_answer="the golden answer", context=["a fact"])
@@ -169,10 +192,125 @@ def test_run_spec_reports_error_when_dataset_fails_to_load(tmp_path):
     conn, target_id = _db(tmp_path)
     spec = _fake_spec([], _fake_metric([], []))
 
-    def broken(theme="general_support"):
+    def broken(theme="general_support", **_kw):
         raise ValueError("bad goldens file")
 
     spec.cases = broken
-    result = run_spec(spec, judge=object(), target=MockTargetClient(), target_id=target_id, conn=conn)
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
     assert result["status"] == "error"
     assert "bad goldens file" in result["error"]
+
+
+def test_lower_metric_reports_violation_rate_and_flips_threshold(tmp_path):
+    conn, target_id = _db(tmp_path)
+    metric = _fake_metric([0.9], [True])  # DeepEval: 0.9 clean
+    spec = _fake_spec([_case("q")], metric)
+    spec.direction = "lower"
+    spec.threshold = 0.5
+    seen = []
+    spec.build_metric = lambda judge, threshold=0.5: seen.append(threshold) or metric
+
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id,
+                      conn=conn, threshold=0.3)
+
+    assert seen == [0.7]                   # "at most 0.3" = DeepEval minimum 0.7
+    assert result["score"] == 0.1          # shown as a 10% violation rate
+    assert result["threshold"] == 0.3 and result["direction"] == "lower"
+    assert storage.history(conn, target_id, "fake_metric")[0]["score"] == 0.1
+
+
+def test_conversation_metric_sends_turns_with_history(tmp_path):
+    conn, target_id = _db(tmp_path)
+    scenario = {"id": "c1", "name": "Order", "user_turns": ["I'm order 7.", "Which order am I?"]}
+    spec = _fake_spec([scenario], _fake_metric([0.8], [True]))
+    spec.kind = "conversation"
+    built = {}
+    spec.build_case = lambda s, turns: built.update(turns=turns) or SimpleNamespace()
+    target = MagicMock()
+    target.chat.side_effect = [SimpleNamespace(reply="Noted."), SimpleNamespace(reply="Order 7.")]
+
+    result = run_spec(spec, judge=object(), target=target, target_id=target_id, conn=conn)
+
+    assert result["status"] == "pass"
+    first, second = target.chat.call_args_list
+    assert first.kwargs["history"] == []
+    assert second.kwargs["history"] == [{"role": "user", "content": "I'm order 7."},
+                                        {"role": "assistant", "content": "Noted."}]
+    assert [t["content"] for t in built["turns"]] == ["I'm order 7.", "Noted.", "Which order am I?", "Order 7."]
+    assert result["rows"][0]["actual_output"].startswith("User: I'm order 7.\nBot: Noted.")
+
+
+def test_retrieval_metric_falls_back_to_golden_context_and_says_so(tmp_path):
+    conn, target_id = _db(tmp_path)
+    golden = {**_case("q"), "expected_answer": "a", "context": ["golden fact"]}
+    spec = _fake_spec([golden], _fake_metric([0.9], [True]))
+    spec.needs_retrieval = True
+    spec.scores_on = ("input", "expected_output", "retrieval_context")
+
+    # The chatbot returns no retrieved context: the golden's context is scored, labelled.
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert result["status"] == "pass"
+    row = result["rows"][0]
+    assert row["context"] == ["golden fact"] and row["context_source"] == "golden"
+    assert row["expected_output"] == "a" and row["input"] == "q"
+    assert "reference context" in result["note"]
+
+    # A chatbot that returns its sources is scored on them.
+    target = MagicMock()
+    target.chat.return_value = SimpleNamespace(reply="r", retrieval_context=["doc 1"])
+    captured = {}
+    spec.build_case = lambda g, reply, retrieval=None: captured.update(r=retrieval) or SimpleNamespace()
+    second = _fake_metric([0.8], [True])
+    spec.build_metric = lambda judge, threshold=0.7: second
+    result = run_spec(spec, judge=object(), target=target, target_id=target_id, conn=conn)
+    assert captured["r"] == ["doc 1"]
+    assert result["rows"][0]["context_source"] == "chatbot" and result["note"] is None
+
+
+def test_run_spec_limit_caps_cases_sent(tmp_path):
+    conn, target_id = _db(tmp_path)
+    cases = [_case(f"q{i}") for i in range(4)]
+    spec = _fake_spec(cases, _fake_metric([0.9, 0.8], [True, True]))
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id,
+                      conn=conn, limit=2)
+    assert result["cases_run"] == 2
+    assert result["cases_total"] == 4
+
+
+def test_run_spec_limit_above_count_runs_everything(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("q0")], _fake_metric([0.9], [True]))
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id,
+                      conn=conn, limit=50)
+    assert result["cases_run"] == 1 and result["status"] == "pass"
+
+
+def test_run_spec_passes_persona_and_probe_set_to_cases(tmp_path):
+    conn, target_id = _db(tmp_path)
+    seen = []
+
+    def load(theme="general_support", persona="", probe_set="ecommerce"):
+        seen.append((persona, probe_set))
+        return [_case("q")]
+
+    spec = _fake_spec([], _fake_metric([0.9], [True]))
+    spec.cases = load
+    run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn,
+             persona="ShopEasy bot", probe_set="generic")
+    assert seen == [("ShopEasy bot", "generic")]
+
+
+def test_judge_one_rejects_security_metrics():
+    spec = _fake_spec([], _fake_metric([], []))
+    spec.dataset_name = "security_probes"
+    result = judge_one(spec, judge=object(), question="hi", actual_output="hello")
+    assert result["status"] == "error"
+    assert "red-team probes" in result["error"]
+
+
+def test_run_spec_stores_how_many_cases_ran(tmp_path):
+    conn, target_id = _db(tmp_path)
+    cases = [_case(f"q{i}") for i in range(3)]
+    spec = _fake_spec(cases, _fake_metric([0.9], [True]))
+    run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn, limit=1)
+    assert storage.latest_runs(conn, target_id)[0]["cases_run"] == 1

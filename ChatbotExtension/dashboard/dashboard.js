@@ -3,31 +3,26 @@
 
 const $ = (id) => document.getElementById(id);
 
-// Short card copy per metric. Purely presentational — the backend doesn't
-// send descriptions, so this stays in sync by hand with metrics_catalog.py.
-const METRIC_DESCRIPTIONS = {
-  answer_relevancy: "Does the reply address the question that was actually asked?",
-  faithfulness: "Is every claim in the reply grounded in the retrieved context?",
-  hallucination: "Does the reply contradict or invent facts against ground truth?",
-  bias: "Does the bot stay neutral when baited with a prejudiced prompt?",
-  toxicity: "Is the reply free of insults, mockery and demeaning language?",
-  pii_leakage: "Does the reply leak personal data or the hidden system prompt?",
-  correctness: "Does the reply match the reference answer on the facts that matter?",
-};
-
-const CATEGORY_LABELS = { quality: "Quality", safety: "Safety", geval: "G-Eval" };
-
+// Card copy, group labels and directions come from /api/metrics (metrics_catalog.py).
 const state = {
   targets: [],
   metrics: [],
   judgeUp: false,
   running: false,
+  thresholds: {},
+  runControl: null,
   trendView: "chart",
   trendChart: null,
   history: [],
   view: "judge",
   categoryFilter: "all",
-  goldenCount: null,
+  casesPerRun: null,
+  chatbotHealth: "unknown",
+  usage: null,
+  judgeSettings: null,
+  usageTimer: null,
+  // Metric keys ticked under "Metrics to run" in the side panel; null = all.
+  checked: null,
   runningKeys: new Set(),
   expandedDetailKeys: new Set(),
   caseDetailsCache: {},
@@ -38,29 +33,62 @@ function currentTarget() {
   return state.targets.find((t) => t.id === id) || null;
 }
 
+// Category key -> label, from the backend, in the order the metrics arrive.
+function categoryLabels() {
+  const labels = {};
+  for (const m of state.metrics) labels[m.ui_category] ??= m.ui_category_label || m.ui_category;
+  return labels;
+}
+
+function isTicked(metric) {
+  return !state.checked || state.checked.has(metric.key);
+}
+
+// The cards the totals and Run all visible work on: this category, ticked in the side panel.
+function countedMetrics() {
+  return visibleMetrics().filter(isTicked);
+}
+
+function visibleMetrics() {
+  return state.metrics.filter(
+    (m) => state.categoryFilter === "all" || m.ui_category === state.categoryFilter,
+  );
+}
+
+// Cases available depend on the target's golden set and role, so the catalog
+// is fetched per target.
+async function loadMetrics() {
+  const target = currentTarget();
+  state.metrics = await api(target ? `/api/metrics?target_id=${target.id}` : "/api/metrics");
+}
+
 function setStatus(text, isError = false) {
   $("status").textContent = text || "";
   $("status").className = isError ? "status-error" : "secondary";
 }
 
 function updateRunButton() {
-  const button = $("run-button");
+  const button = $("run-all-button");
   button.disabled = !state.judgeUp || !currentTarget() || state.running;
-  button.title = state.judgeUp ? "" : "Judge not configured: JUDGE_API_KEY is missing";
+  button.title = state.judgeUp
+    ? "Run every card in the selected category, one after another"
+    : "Judge not configured: add its API key in the side panel's Judge settings";
 }
 
 async function refreshJudge() {
   try {
     const status = await api("/api/status");
     state.judgeUp = status.judge.up;
+    state.judgeSettings = await api("/api/judge/settings");
     if (!state.judgeUp) {
-      setStatus("Judge not configured: add JUDGE_API_KEY to .env, then restart the backend.", true);
+      setStatus("Judge not configured: add its API key in the side panel (Judge settings).", true);
     }
   } catch (error) {
     state.judgeUp = false;
     setStatus(error.message, true);
   }
   updateRunButton();
+  renderTiles();
 }
 
 function appendBubble(kind, text, meta, judgeTarget) {
@@ -104,7 +132,7 @@ function judgeBadge(title, result, error) {
   const summary = el(
     "button",
     { type: "button", className: `judge-badge-toggle status-${result.status}` },
-    `${icon} ${title} ${formatScore(result.score)} / ${formatScore(result.threshold)}`,
+    `${icon} ${title} ${formatScore(result.score)} ${comparator(result.direction)} ${formatScore(result.threshold)}`,
   );
   const reasonEl = el("p", { className: "judge-badge-reason hidden" }, result.reason || "No reason given.");
   summary.addEventListener("click", () => reasonEl.classList.toggle("hidden"));
@@ -119,7 +147,12 @@ async function judgeAnswer(question, actualOutput, bubble) {
   const target = currentTarget();
   if (!target) return;
   const choice = $("metric-select").value;
-  const keys = choice === ALL_METRICS ? state.metrics.map((m) => m.key) : [choice];
+  // Security metrics judge replies to their own red-team probes, not a chat answer.
+  const keys = metricsFor(choice, state.metrics).filter((m) => m.ui_category !== "security").map((m) => m.key);
+  if (!keys.length) {
+    setStatus("Security metrics score their red-team probes: run them from the cards.", true);
+    return;
+  }
   const titles = new Map(state.metrics.map((m) => [m.key, m.title]));
   const list = el("ul", { className: "judge-badges" });
   bubble.append(list);
@@ -136,6 +169,7 @@ async function judgeAnswer(question, actualOutput, bubble) {
           question,
           actual_output: actualOutput,
           theme: themeOf(target),
+          threshold: thresholdFor(state.metrics.find((m) => m.key === key) || { threshold: undefined }, state.thresholds),
         },
       });
     } catch (e) {
@@ -150,7 +184,8 @@ async function judgeAnswer(question, actualOutput, bubble) {
 async function loadTargets(preferredId) {
   state.targets = await fetchTargets();
   const wanted = preferredId ?? (await settings.get("selectedTargetId", null));
-  const selected = state.targets.some((t) => t.id === wanted) ? wanted : state.targets[0].id;
+  const fallback = state.targets.length ? state.targets[0].id : null;
+  const selected = state.targets.some((t) => t.id === wanted) ? wanted : fallback;
   fillSelect(
     $("target-select"),
     state.targets.map((t) => ({ value: t.id, label: targetLabel(t) })),
@@ -162,6 +197,10 @@ async function loadTargets(preferredId) {
 async function onTargetChanged() {
   const target = currentTarget();
   await settings.set("selectedTargetId", target ? target.id : null);
+  state.chatbotHealth = "unknown";
+  await loadMetrics();
+  renderCategoryChips();
+  renderTiles();
   $("chat-log").replaceChildren();
   // A real chatbot keeps its context per conversation; a new target starts fresh.
   state.history = [];
@@ -171,39 +210,103 @@ async function onTargetChanged() {
   state.caseDetailsCache = {};
   updateRunButton();
   renderCases(await settings.get("lastRun", null));
-  await Promise.all([renderLatest(), renderTrend(), renderGoldenCount()]);
+  await Promise.all([renderLatest(), renderTrend()]);
   if (state.view === "history") await renderHistory();
 }
 
-async function renderGoldenCount() {
-  const target = currentTarget();
-  if (!target) return;
+function hostOf(url) {
   try {
-    const goldens = await api(`/api/goldens?theme=${encodeURIComponent(themeOf(target))}`);
-    state.goldenCount = goldens.length;
+    return new URL(url).host;
   } catch {
-    state.goldenCount = null;
+    return url || "";
   }
-  $("status-goldens-text").textContent =
-    state.goldenCount === null ? "–" : `${state.goldenCount} golden answer${state.goldenCount === 1 ? "" : "s"}`;
 }
 
-// Top status strip: chatbot + judge health (from /api/status, refreshJudge)
-// plus a pass/fail/not-run tally across every metric's latest run.
-function renderStatusStrip(rows) {
+function setDot(id, level) {
+  const cls = { good: "dot-good", warn: "dot-warn", bad: "dot-bad" }[level] || "dot-unknown";
+  $(id).className = `dot ${cls}`;
+}
+
+function renderTiles() {
   const target = currentTarget();
-  $("status-chatbot-dot").className = `dot ${target ? "dot-good" : "dot-off"}`;
-  $("status-chatbot-text").textContent = target ? `Chatbot · ${target.name}` : "Chatbot · none selected";
-  $("status-judge-dot").className = `dot ${state.judgeUp ? "dot-good" : "dot-off"}`;
-  $("status-judge-text").textContent = state.judgeUp ? "Judge ready" : "Judge not configured";
+  setDot("tile-chatbot-dot", target ? state.chatbotHealth : "off");
+  $("tile-chatbot-text").textContent = target ? target.config.url || target.name : "no chatbot selected";
+  const ownContext = Boolean(target && target.config.context_path);
+  setDot("tile-rag-dot", target ? (ownContext ? "good" : "warn") : "off");
+  $("tile-rag-text").textContent = !target
+    ? "–"
+    : ownContext
+      ? `own retrieval context (${target.config.context_path})`
+      : "golden context fallback";
+  const judge = state.judgeSettings;
+  setDot("tile-judge-dot", state.judgeUp ? "good" : "bad");
+  $("tile-judge-text").textContent = judge ? `${hostOf(judge.base_url)} · ${judge.model}` : "–";
+  $("judge-model").value = judge ? judge.model : "";
+  const u = state.usage;
+  $("tile-tokens-total").textContent = u ? `${u.total_tokens} total · ${u.calls} calls` : "–";
+  $("tile-tokens-split").textContent = u ? `target ${u.target_calls} · judge ${u.judge_calls}` : "";
+}
+
+// A score on a common "higher is better" scale: "lower" metrics (hallucination,
+// bias, toxicity, PII) are violation rates, so they count as 1 − score.
+function normalizedScore(metric, score) {
+  if (typeof score !== "number") return null;
+  return metric.direction === "lower" ? 1 - score : score;
+}
+
+function averageScore(metrics, byKey) {
+  const scores = metrics
+    .map((m) => normalizedScore(m, byKey.get(m.key)?.score))
+    .filter((s) => s !== null);
+  return scores.length ? { value: scores.reduce((a, b) => a + b, 0) / scores.length, count: scores.length } : null;
+}
+
+// pass · fail · pending and the average score across the cards the chip filter shows.
+function renderCounts(rows) {
   const byKey = new Map(rows.map((r) => [r.metric_key, r]));
-  const total = state.metrics.length;
-  const pass = state.metrics.filter((m) => byKey.get(m.key)?.passed === true).length;
-  const fail = state.metrics.filter((m) => byKey.get(m.key) && !byKey.get(m.key).passed).length;
-  const pending = total - pass - fail;
-  $("status-pass").textContent = `${pass} pass`;
-  $("status-fail").textContent = `${fail} fail`;
-  $("status-pending").textContent = `${pending} not run`;
+  const shown = countedMetrics();
+  // SQLite hands `passed` back as 1 / 0, so test truthiness, not `=== true`.
+  const pass = shown.filter((m) => byKey.has(m.key) && Boolean(byKey.get(m.key).passed)).length;
+  const fail = shown.filter((m) => byKey.has(m.key) && !byKey.get(m.key).passed).length;
+  $("status-pass").textContent = pass;
+  $("status-fail").textContent = fail;
+  $("status-pending").textContent = shown.length - pass - fail;
+  const avg = averageScore(shown, byKey);
+  $("tile-average").textContent = avg ? formatScore(avg.value) : "–";
+  $("tile-average-note").textContent = avg
+    ? `${avg.count} of ${shown.length} ticked cards run · lower-is-better as 1 − score`
+    : "no runs yet for the ticked cards";
+  $("tile-counts-label").textContent = `pass · fail · pending · ${shown.length} ticked`;
+}
+
+async function refreshUsage() {
+  try {
+    state.usage = await api("/api/usage");
+  } catch {
+    state.usage = null;
+  }
+  renderTiles();
+}
+
+// Refresh status: re-check the judge and send the chatbot one test question.
+async function refreshStatus() {
+  await refreshJudge();
+  const target = currentTarget();
+  if (target) {
+    const { headers: _masked, ...config } = target.config;
+    try {
+      const result = await api("/api/targets/test", {
+        method: "POST",
+        body: { type: target.type, config, message: "Hello", target_id: target.id },
+      });
+      state.chatbotHealth = result.ok ? "good" : "bad";
+      setStatus(result.ok ? "Chatbot and judge checked." : `Chatbot: ${result.error}`, !result.ok);
+    } catch (error) {
+      state.chatbotHealth = "bad";
+      setStatus(error.message, true);
+    }
+  }
+  await refreshUsage();
 }
 
 // One row per golden case: the question, the chatbot's actual answer, and
@@ -219,44 +322,66 @@ function caseDetailPanel(metric, details) {
   if (!details.rows.length) {
     return el("p", { className: "case-detail-empty muted" }, "No cases in the last run.");
   }
+  const direction = details.direction || metric.direction;
+  const threshold = typeof details.threshold === "number" ? details.threshold : thresholdFor(metric, state.thresholds);
   return el(
     "div",
     { className: "case-detail" },
-    el("p", { className: "muted small" }, `As of ${formatRunTime(details.finishedAt)}`),
+    el("p", { className: "muted small" }, `As of ${formatRunTime(details.finishedAt)} · each case scored ${comparator(direction)} ${formatScore(threshold)}`),
+    details.note ? el("p", { className: "case-note" }, `⚠ ${details.note}`) : null,
     el(
       "ul",
       { className: "case-list" },
-      ...details.rows.map((row) => {
-        const reasonEl = el("p", { className: "case-reason hidden" }, row.reason || "No reason given.");
-        const toggle = el(
-          "button",
-          { type: "button", className: `case-score status-${row.passed ? "pass" : "fail"}` },
-          `${row.passed ? "✓" : "✕"} ${formatScore(row.score)} — why?`,
-        );
-        toggle.addEventListener("click", () => reasonEl.classList.toggle("hidden"));
-        return el(
-          "li",
-          { className: "case-row" },
-          el("p", { className: "case-q" }, `Q: ${row.question}`),
-          el("p", { className: "case-a" }, `A: ${row.actual_output}`),
-          toggle,
-          reasonEl,
-        );
-      }),
+      ...details.rows.map((row) => el(
+        "li",
+        { className: "case-row" },
+        el(
+          "p",
+          { className: `case-score status-${row.passed ? "pass" : "fail"}` },
+          `${row.passed ? "✓ pass" : "✕ fail"} · ${formatScore(row.score)} ${comparator(direction)} ${formatScore(threshold)}`,
+        ),
+        el("dl", { className: "case-fields" }, ...caseFields(metric, row)),
+      )),
     ),
   );
+}
+
+// Label / value pairs for one case: what was asked, what came back, what was
+// expected, the context the judge read, and the judge's reason.
+function caseFields(metric, row) {
+  const pairs = [];
+  const add = (label, value) => {
+    if (value === null || value === undefined || value === "") return;
+    pairs.push(el("dt", {}, label), el("dd", {}, value));
+  };
+  if (metric && metric.kind === "conversation") {
+    add("Scenario", row.question);
+    add("User turns", row.input);
+    add("Conversation (actual result)", row.actual_output);
+    add("Expected outcome", row.expected_output);
+  } else {
+    add("Question", row.input && row.input !== row.question ? row.input : row.question);
+    add("Actual result", row.actual_output);
+    add("Expected result", row.expected_output);
+    if (row.context && row.context.length) {
+      add(contextLabel(metric, row), el("ul", {}, ...row.context.map((line) => el("li", {}, line))));
+    }
+  }
+  add("Why", row.reason || "No reason given.");
+  return pairs;
+}
+
+function contextLabel(metric, row) {
+  if (row.context_source === "chatbot") return "Retrieved context (from the chatbot)";
+  const retrieval = metric && (metric.scores_on || []).includes("retrieval_context");
+  return retrieval ? "Retrieved context (golden reference)" : "Context (golden reference)";
 }
 
 // Keeps an already-open detail panel in sync with a metric that just
 // finished running, instead of showing scores from before the run.
 function refreshExpandedDetail(key, result) {
   if (!state.expandedDetailKeys.has(key)) return;
-  state.caseDetailsCache[key] = {
-    finishedAt: Date.now(),
-    status: result.status,
-    error: result.error || null,
-    rows: result.rows || [],
-  };
+  state.caseDetailsCache[key] = caseDetailsOf(result);
 }
 
 async function toggleCardDetails(key) {
@@ -275,36 +400,53 @@ function metricCard(metric, row) {
   const isRunning = state.runningKeys.has(metric.key);
   const hasRun = Boolean(row);
   const statusClass = isRunning ? "running" : !hasRun ? "not-run" : row.passed ? "pass" : "fail";
-  const statusLabel = isRunning ? "RUNNING…" : !hasRun ? "NOT RUN" : row.passed ? "PASS" : "FAIL";
-  const goldenText =
-    state.goldenCount === null
-      ? ""
-      : `${state.goldenCount} golden answer${state.goldenCount === 1 ? "" : "s"}`;
+  const statusLabel = isRunning ? "RUNNING" : !hasRun ? "NOT RUN" : row.passed ? "PASS" : "FAIL";
+  const threshold = thresholdFor(metric, state.thresholds);
+  const score = hasRun ? row.score : null;
+  const cases = metric.cases_available ?? 0;
+  const barWidth = typeof score === "number" ? Math.round(Math.max(0, Math.min(1, score)) * 100) : 0;
+  const bound = `${comparator(metric.direction)} ${formatScore(threshold)}`;
   return el(
     "div",
-    { className: `metric-card status-${statusClass}` },
+    { className: `metric-card status-${statusClass}${isTicked(metric) ? "" : " unticked"}` },
     el(
       "div",
       { className: "metric-card-head" },
-      el("span", { className: `chip category-${metric.category}` }, CATEGORY_LABELS[metric.category] || metric.category),
-      el("span", { className: `metric-card-status status-${statusClass}` }, statusLabel),
+      el("span", { className: `badge badge-${metric.ui_category}` }, metric.ui_category_label || metric.ui_category),
+      el("span", { className: "badge badge-target" }, "chatbot"),
+      isTicked(metric) ? null : el("span", { className: "badge badge-unticked", title: "Not ticked under Metrics to run in the side panel: left out of the totals and Run all visible" }, "not ticked"),
+      el("span", { className: "card-threshold" }, bound),
     ),
     el("h3", {}, metric.title),
-    el("p", { className: "metric-card-desc" }, METRIC_DESCRIPTIONS[metric.key] || ""),
-    isRunning
-      ? el("div", { className: "run-bar running" }, el("span", { className: "run-bar-fill" }))
-      : el(
-          "div",
-          { className: "metric-score-box" },
-          el("span", { className: "score" }, hasRun ? formatScore(row.score) : "–"),
-          el("span", { className: "threshold" }, `≥ ${formatScore(metric.threshold)}`),
-        ),
+    el("p", { className: "metric-card-desc" }, metric.description || ""),
     el(
-      "p",
-      { className: "metric-card-meta muted" },
+      "div",
+      { className: "card-inset" },
+      el(
+        "div",
+        { className: "score-row" },
+        el("span", { className: `status-pill status-${statusClass}` }, statusLabel),
+        el("span", { className: "score-cell" }, el("b", {}, hasRun ? formatScore(score) : "–"), el("small", {}, "SCORE")),
+        el("span", { className: "score-cell" }, el("b", {}, bound), el("small", {}, "THRESHOLD")),
+      ),
       isRunning
-        ? "scoring each golden answer against the judge…"
-        : [goldenText, hasRun ? formatRunTime(row.ts) : "not run yet"].filter(Boolean).join(" · "),
+        ? el("div", { className: "run-bar running" }, el("span", { className: "run-bar-fill" }))
+        : el(
+            "div",
+            { className: "score-bar" },
+            el("span", { className: "score-bar-fill", style: `width:${barWidth}%` }),
+            el("span", { className: "score-bar-tick", style: `left:${Math.round(threshold * 100)}%` }),
+          ),
+      el("p", { className: "scale-hint" }, metric.scale_hint || ""),
+      el("p", { className: "card-question" }, metric.question || ""),
+      el(
+        "p",
+        { className: "card-meta" },
+        cases
+          ? `${cases} case${cases === 1 ? "" : "s"} available · ${metric.dataset}${metric.probe_set ? ` (${metric.probe_set})` : ""}`
+          : "no cases for this chatbot's golden set",
+      ),
+      el("p", { className: "card-meta" }, hasRun ? formatRunTime(row.ts) : "–"),
     ),
     el(
       "div",
@@ -313,31 +455,16 @@ function metricCard(metric, row) {
         "button",
         {
           type: "button",
-          className: "run-metric",
-          disabled: !state.judgeUp || !currentTarget() || isRunning || state.running,
-          onclick: () => runSingleMetric(metric.key),
+          className: "run-metric primary",
+          disabled: !state.judgeUp || !currentTarget() || state.running || cases === 0,
+          onclick: () => runKeys([metric.key]),
         },
-        isRunning ? "▸ Running…" : "▸ Run",
+        isRunning ? "▶ Running…" : "▶ Run",
       ),
       el(
         "button",
-        {
-          type: "button",
-          onclick: () => toggleCardDetails(metric.key),
-        },
+        { type: "button", onclick: () => toggleCardDetails(metric.key) },
         state.expandedDetailKeys.has(metric.key) ? "Hide details" : "Details",
-      ),
-      el(
-        "button",
-        {
-          type: "button",
-          onclick: () => {
-            $("metric-select").value = metric.key;
-            settings.set("selectedMetric", metric.key);
-            setView("history");
-          },
-        },
-        "Trend",
       ),
     ),
     state.expandedDetailKeys.has(metric.key) ? caseDetailPanel(metric, state.caseDetailsCache[metric.key]) : null,
@@ -345,8 +472,8 @@ function metricCard(metric, row) {
 }
 
 function renderCategoryChips() {
-  const categories = [...new Set(state.metrics.map((m) => m.category))];
-  const items = ["all", ...categories];
+  const labels = categoryLabels();
+  const items = ["all", ...Object.keys(labels)];
   $("category-chips").replaceChildren(
     ...items.map((cat) =>
       el(
@@ -357,40 +484,111 @@ function renderCategoryChips() {
           "aria-pressed": String(cat === state.categoryFilter),
           onclick: () => {
             state.categoryFilter = cat;
+            settings.set("dashCategory", cat);
             renderCategoryChips();
             renderMetricGrid();
+            renderCounts(latestRowsCache);
           },
         },
-        cat === "all" ? "All" : CATEGORY_LABELS[cat] || cat,
+        cat === "all" ? "All" : labels[cat],
       ),
     ),
   );
 }
 
-async function runSingleMetric(key) {
-  const target = currentTarget();
-  if (!target) return;
+// One run at a time; the Stop button reaches it through state.runControl.
+function beginRun() {
   state.running = true;
+  state.runControl = {};
+  $("stop-button").disabled = false;
+  $("stop-button").textContent = "■ Stop";
+  $("stop-button").classList.remove("hidden");
+  $("run-all-button").classList.add("hidden");
   updateRunButton();
+}
+
+function endRun() {
+  state.running = false;
+  state.runControl = null;
+  $("stop-button").classList.add("hidden");
+  $("run-all-button").classList.remove("hidden");
+}
+
+$("stop-button").addEventListener("click", async () => {
+  if (!state.runControl) return;
+  $("stop-button").disabled = true;
+  $("stop-button").textContent = "Stopping…";
+  setStatus("Stopping after the current step…");
   try {
-    await runMetrics(target, [key], (_key, result) => {
-      const title = state.metrics.find((m) => m.key === key)?.title || key;
+    await stopRun(state.runControl);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+function startUsagePolling() {
+  stopUsagePolling();
+  state.usageTimer = setInterval(refreshUsage, 2000);
+}
+
+function stopUsagePolling() {
+  if (state.usageTimer) clearInterval(state.usageTimer);
+  state.usageTimer = null;
+}
+
+// Runs the given metrics one after another; Stop (header) cancels the current
+// run and skips the rest. Used by each card's Run and by Run all visible.
+async function runKeys(keys) {
+  const target = currentTarget();
+  if (!target || !keys.length) return;
+  const byMetric = new Map(state.metrics.map((m) => [m.key, m]));
+  beginRun();
+  state.runControl.limit = state.casesPerRun;
+  startUsagePolling();
+  try {
+    const results = await runMetrics(target, keys, (key, result, progress) => {
+      const title = byMetric.get(key)?.title || key;
       if (result === null) {
+        const fresh = !state.runningKeys.has(key);
         state.runningKeys.add(key);
-        setStatus(`Running ${title}… (this calls the real judge model per golden case, can take a while)`);
+        setStatus(`Running ${title} · ${progressText(progress)}`);
+        if (!fresh) return;  // progress ticks only update the status line
       } else {
         state.runningKeys.delete(key);
-        refreshExpandedDetail(key, result);
-        if (result.status === "error") setStatus(`${title}: ${result.error}`, true);
-        else setStatus(`${title}: ${formatScore(result.score)} ${result.status} (${result.cases_run} cases)`);
+        if (result.status === "cancelled") {
+          setStatus(`${title}: ${result.error} (not saved)`);
+        } else {
+          const unreachable = result.status === "error" && /HTTP|Connection|Timeout/i.test(result.error || "");
+          state.chatbotHealth = unreachable ? "bad" : result.status === "error" ? state.chatbotHealth : "good";
+          refreshExpandedDetail(key, result);
+          if (result.status === "error") setStatus(`${title}: ${result.error}`, true);
+          else setStatus(`${title}: ${formatScore(result.score)} ${result.status} (${result.cases_run} of ${result.cases_total} cases)`);
+        }
+        renderLatest();
       }
       renderMetricGrid();
-    });
+    }, state.runControl);
+    const failed = results.filter((r) => r.status === "error").length;
+    // Stop pressed between two metrics cancels nothing in flight; the loop just ends early.
+    const stopped = results.some((r) => r.status === "cancelled") || results.length < keys.length;
+    if (stopped && results.length < keys.length) {
+      setStatus(`Stopped after ${results.filter((r) => r.status !== "cancelled").length} of ${keys.length} metrics.`);
+    }
+    if (keys.length > 1 && !stopped) {
+      // The batch's own average, on the same higher-is-better scale as the tile.
+      const scored = results
+        .map((r) => normalizedScore(byMetric.get(r.key) || {}, r.score))
+        .filter((s) => s !== null);
+      const avg = scored.length ? ` · average score ${formatScore(scored.reduce((a, b) => a + b, 0) / scored.length)}` : "";
+      setStatus(`Finished ${keys.length} metrics${avg}${failed ? ` · ${failed} could not run` : ""}.`, failed > 0);
+    }
   } finally {
-    state.running = false;
-    state.runningKeys.delete(key);
+    stopUsagePolling();
+    endRun();
+    for (const key of keys) state.runningKeys.delete(key);
     updateRunButton();
     renderMetricGrid();
+    await Promise.all([renderLatest(), renderTrend(), refreshUsage()]);
   }
 }
 
@@ -400,7 +598,7 @@ async function runSingleMetric(key) {
 let latestRowsCache = [];
 
 function renderMetricGrid() {
-  const shown = state.metrics.filter((m) => state.categoryFilter === "all" || m.category === state.categoryFilter);
+  const shown = visibleMetrics();
   const byKey = new Map(latestRowsCache.map((r) => [r.metric_key, r]));
   $("metric-grid-empty").classList.toggle("hidden", state.metrics.length > 0);
   $("metric-grid").replaceChildren(...shown.map((m) => metricCard(m, byKey.get(m.key))));
@@ -411,7 +609,7 @@ async function renderLatest() {
   if (!target) return;
   try {
     latestRowsCache = await api(`/api/runs/latest?target_id=${target.id}`);
-    renderStatusStrip(latestRowsCache);
+    renderCounts(latestRowsCache);
     renderMetricGrid();
   } catch (error) {
     setStatus(error.message, true);
@@ -447,12 +645,8 @@ async function renderTrend() {
   const target = currentTarget();
   if (!target || state.metrics.length === 0) return;
   const choice = $("metric-select").value;
-  const metrics =
-    choice === ALL_METRICS ? state.metrics : state.metrics.filter((m) => m.key === choice);
-  $("trend-heading").textContent =
-    choice === ALL_METRICS
-      ? "Score trend across runs · all metrics"
-      : `Score trend across runs · ${metrics[0] ? metrics[0].title : choice}`;
+  const metrics = metricsFor(choice, state.metrics);
+  $("trend-heading").textContent = `Score trend across runs · ${choiceLabel(choice, state.metrics)}`;
   const box = $("trend-chart-box");
   box.classList.add("loading");
   try {
@@ -472,7 +666,7 @@ async function renderTrend() {
       state.trendChart = drawChart(
         $("trend-chart"),
         state.trendChart,
-        trendChartConfig(historyByMetric, state.metrics),
+        trendChartConfig(historyByMetric, withUserThresholds(state.metrics, state.thresholds)),
       );
     }
   } catch (error) {
@@ -489,7 +683,7 @@ async function renderHistory() {
   const target = currentTarget();
   if (!target || state.metrics.length === 0) return;
   const choice = $("metric-select").value;
-  const metrics = choice === ALL_METRICS ? state.metrics : state.metrics.filter((m) => m.key === choice);
+  const metrics = metricsFor(choice, state.metrics);
   const byKey = new Map(state.metrics.map((m) => [m.key, m]));
   const table = $("history-table");
   const empty = $("history-empty");
@@ -510,7 +704,9 @@ async function renderHistory() {
           el("td", {}, formatRunTime(r.ts)),
           el("td", {}, byKey.get(r.metric_key)?.title ?? r.metric_key),
           el("td", { className: "num" }, formatScore(r.score)),
-          el("td", { className: "num" }, formatScore(byKey.get(r.metric_key)?.threshold)),
+          el("td", { className: "num" }, byKey.get(r.metric_key)
+            ? `${comparator(byKey.get(r.metric_key).direction)} ${formatScore(thresholdFor(byKey.get(r.metric_key), state.thresholds))}`
+            : "–"),
           el("td", { className: r.passed ? "status-pass" : "status-fail" }, resultLabel(r.passed)),
         ),
       ),
@@ -539,6 +735,9 @@ function renderCases(lastRun) {
   $("cases-heading").textContent = result
     ? `Last run, case by case · ${metric ? metric.title : lastRun.metricKey}`
     : "Last run, case by case";
+  const note = $("cases-note");
+  note.classList.toggle("hidden", !(result && result.note));
+  note.textContent = result && result.note ? `⚠ ${result.note}` : "";
   if (!result || result.status === "error") {
     table.classList.add("hidden");
     empty.classList.remove("hidden");
@@ -555,8 +754,12 @@ function renderCases(lastRun) {
       el(
         "tr",
         {},
-        el("td", {}, row.question),
+        el("td", {}, row.input && row.input !== row.question ? row.input : row.question),
         el("td", {}, row.actual_output),
+        el("td", {}, row.expected_output || "–"),
+        el("td", { className: "cases-context" }, row.context && row.context.length
+          ? `${row.context_source === "chatbot" ? "(chatbot) " : "(golden) "}${row.context.map((line) => `• ${line}`).join("\n")}`
+          : "–"),
         el("td", { className: "num" }, formatScore(row.score)),
         el("td", { className: row.passed ? "status-pass" : "status-fail" }, resultLabel(row.passed)),
         el("td", {}, row.reason || "–"),
@@ -593,41 +796,13 @@ $("chat-form").addEventListener("submit", async (event) => {
   }
 });
 
-$("run-button").addEventListener("click", async () => {
-  const target = currentTarget();
-  if (!target) return;
-  const choice = $("metric-select").value;
-  const keys = choice === ALL_METRICS ? state.metrics.map((m) => m.key) : [choice];
-  const titles = new Map(state.metrics.map((m) => [m.key, m.title]));
-  state.running = true;
-  updateRunButton();
-  try {
-    const results = await runMetrics(target, keys, (key, result) => {
-      const title = titles.get(key) || key;
-      if (result === null) {
-        state.runningKeys.add(key);
-        setStatus(`Running ${title}… (real judge calls per golden case, can take a while)`);
-      } else {
-        state.runningKeys.delete(key);
-        refreshExpandedDetail(key, result);
-        if (result.status === "error") setStatus(`${title}: ${result.error}`, true);
-        else setStatus(`${title}: ${formatScore(result.score)} ${result.status} (${result.cases_run} cases)`);
-      }
-      renderMetricGrid();
-    });
-    const failed = results.filter((r) => r.status === "error").length;
-    if (keys.length > 1) {
-      setStatus(
-        `Finished ${keys.length} metrics${failed ? ` · ${failed} could not run` : ""}.`,
-        failed > 0,
-      );
-    }
-  } finally {
-    state.running = false;
-    for (const key of keys) state.runningKeys.delete(key);
-    updateRunButton();
-    renderMetricGrid();
+$("run-all-button").addEventListener("click", () => {
+  const keys = countedMetrics().filter((m) => (m.cases_available ?? 0) > 0).map((m) => m.key);
+  if (!keys.length) {
+    setStatus("No ticked metric in this category has cases for this chatbot (tick metrics under Metrics to run in the side panel).", true);
+    return;
   }
+  runKeys(keys);
 });
 
 for (const button of document.querySelectorAll("[data-view]")) {
@@ -644,6 +819,25 @@ for (const button of document.querySelectorAll("[data-trend-view]")) {
   });
 }
 
+$("cases-select").addEventListener("change", () => {
+  const value = $("cases-select").value;
+  state.casesPerRun = value ? Number(value) : null;
+  settings.set("casesPerRun", state.casesPerRun);
+});
+
+$("refresh-status").addEventListener("click", () => {
+  refreshStatus().catch((error) => setStatus(error.message, true));
+});
+
+$("tokens-reset").addEventListener("click", async () => {
+  try {
+    state.usage = await api("/api/usage/reset", { method: "POST", body: {} });
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+  renderTiles();
+});
+
 $("target-select").addEventListener("change", () => {
   onTargetChanged().catch((error) => setStatus(error.message, true));
 });
@@ -655,6 +849,12 @@ $("metric-select").addEventListener("change", () => {
 });
 
 settings.onChange((changes) => {
+  if (changes.checkedMetrics) {
+    const keys = changes.checkedMetrics.newValue;
+    state.checked = Array.isArray(keys) ? new Set(keys) : null;
+    renderMetricGrid();
+    renderCounts(latestRowsCache);
+  }
   const target = currentTarget();
   const run = changes.lastRun && changes.lastRun.newValue;
   const wasRun = changes.lastRun && changes.lastRun.oldValue;
@@ -670,6 +870,11 @@ settings.onChange((changes) => {
   if (changes.selectedTargetId && changes.selectedTargetId.newValue !== (target ? target.id : null)) {
     loadTargets(changes.selectedTargetId.newValue).catch((error) => setStatus(error.message, true));
   }
+  if (changes.thresholds) {
+    state.thresholds = changes.thresholds.newValue || {};
+    renderMetricGrid();
+    renderTrend();
+  }
   if (changes.selectedMetric && changes.selectedMetric.newValue !== $("metric-select").value) {
     $("metric-select").value = changes.selectedMetric.newValue;
     renderTrend();
@@ -684,17 +889,24 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 
 window.addEventListener("focus", () => {
   refreshJudge();
-  renderGoldenCount();
 });
 
 (async function init() {
   await refreshJudge();
   try {
-    state.metrics = await api("/api/metrics");
+    state.categoryFilter = await settings.get("dashCategory", "all");
+    state.casesPerRun = await settings.get("casesPerRun", null);
+    $("cases-select").value = state.casesPerRun ? String(state.casesPerRun) : "";
+    await loadMetrics();
+    const ticked = await settings.get("checkedMetrics", null);
+    state.checked = Array.isArray(ticked) ? new Set(ticked) : null;
+    if (state.categoryFilter !== "all" && !categoryLabels()[state.categoryFilter]) state.categoryFilter = "all";
     const savedMetric = await settings.get("selectedMetric", ALL_METRICS);
-    fillSelect($("metric-select"), metricOptions(state.metrics), savedMetric);
+    state.thresholds = await settings.get("thresholds", {});
+    fillMetricSelect($("metric-select"), state.metrics, savedMetric);
     renderCategoryChips();
     await loadTargets();
+    await refreshUsage();
   } catch (error) {
     setStatus(`${error.message} Reload this tab once the backend is running.`, true);
   }

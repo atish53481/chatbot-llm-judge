@@ -9,14 +9,12 @@ from dataclasses import dataclass
 class ChatReply:
     reply: str
     model: str
-    mode: str  # "mock" | "http" | "dom"
+    mode: str  # "http"
+    # What the chatbot's retriever returned, when its response carries it (RAG metrics).
+    retrieval_context: list[str] | None = None
 
 
 class ChatbotClient(ABC):
-    @abstractmethod
-    def health(self) -> dict:
-        ...
-
     @abstractmethod
     def chat(self, message: str, history: list[dict] | None = None) -> ChatReply:
         ...

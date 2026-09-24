@@ -1,5 +1,6 @@
 // Chart builders shared by the side panel and the dashboard (Chart.js 4).
-// Every metric scores 0..1, higher is better, and its threshold is a minimum.
+// Every metric scores 0..1. Most are higher-is-better (threshold = minimum);
+// violation-rate metrics are lower-is-better (threshold = maximum).
 // Colors come from lib/theme.css at draw time, so light and dark mode swap in
 // one place. The series palette passed the dataviz palette validator; in light
 // mode aqua, yellow and magenta sit below 3:1 on the surface, so every chart
@@ -128,7 +129,7 @@ function latestChartConfig(rows, catalog, kind) {
   const thresholds = ordered.map((r) => byKey.get(r.metric_key).threshold);
   const accent = cssVar("--series-1");
   const threshold = {
-    label: "Threshold (minimum)",
+    label: "Threshold",
     data: thresholds,
     borderColor: ink.secondary,
     borderWidth: 1,
@@ -260,7 +261,7 @@ function trendChartConfig(historyByMetric, catalog) {
   });
   if (single) {
     datasets.push({
-      label: "Threshold (minimum)",
+      label: "Threshold",
       data: times.map(() => shown[0].threshold),
       borderColor: ink.secondary,
       borderWidth: 1,

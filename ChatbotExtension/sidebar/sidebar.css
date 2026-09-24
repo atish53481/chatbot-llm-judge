@@ -77,6 +77,18 @@ summary {
   color: var(--text-secondary);
 }
 
+.card-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.small-button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .golden-list {
   list-style: none;
   margin: 0;
@@ -115,6 +127,33 @@ summary {
 .golden-list button {
   padding: 2px 6px;
   font-size: 12px;
+}
+
+/* The inline editor needs room, so the list stops scrolling while it is open. */
+.golden-list.editing {
+  max-height: none;
+}
+
+.golden-list li.selected {
+  border-bottom: none;
+  box-shadow: inset 3px 0 0 var(--accent);
+  padding-left: 8px;
+}
+
+.golden-list li.golden-editor {
+  display: block;
+  padding: 0 0 10px 8px;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.golden-editor .stack {
+  margin-top: 0;
+}
+
+.golden-editor textarea,
+.golden-editor input {
+  width: 100%;
+  resize: vertical;
 }
 
 .run-results {
@@ -204,4 +243,97 @@ summary {
 .document-row span:first-child {
   flex: 1;
   overflow-wrap: anywhere;
+}
+
+.threshold-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.threshold-table h4 {
+  margin: 8px 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.threshold-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto 5em;
+  align-items: center;
+  gap: 6px;
+}
+
+.threshold-row.unchecked span {
+  color: var(--text-secondary);
+}
+
+.threshold-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.metric-check-actions {
+  margin: 6px 0 2px;
+}
+
+.run-row-buttons {
+  margin-top: 8px;
+}
+
+.threshold-row .direction {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.threshold-row input {
+  width: 100%;
+  padding: 2px 4px;
+}
+
+.threshold-env-row {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.threshold-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.threshold-input input {
+  width: 4.5em;
+}
+
+#target-form textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* What a running judge is doing right now: which golden, and chatbot or judge. */
+.run-row-detail {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-bar .run-bar-fill {
+  transition: width 0.4s ease;
 }

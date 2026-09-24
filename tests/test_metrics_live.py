@@ -1,4 +1,4 @@
-"""Live judge regression: every catalog metric against the mock target.
+"""Live judge regression: every catalog metric against the canned test chatbot.
 
 Spends judge tokens, so it only runs when asked:
     set RUN_LIVE_JUDGE=1 (with JUDGE_API_KEY in the environment or .env)
@@ -9,8 +9,8 @@ import os
 import pytest
 
 from backend.judges.judge import build_judge
-from backend.metrics_catalog import ALL_SPECS
-from backend.targets.mock import MockTargetClient
+from backend.metrics_catalog import ALL_SPECS, deepeval_threshold
+from tests.fakes import CannedChatbot
 
 pytestmark = [
     pytest.mark.live,
@@ -27,10 +27,12 @@ def judge():
 
 
 @pytest.mark.parametrize("spec", ALL_SPECS, ids=[s.key for s in ALL_SPECS])
-def test_mock_target_meets_threshold(spec, judge):
-    # One golden per metric keeps a live run to seven judged answers.
+def test_canned_chatbot_meets_threshold(spec, judge):
+    if spec.kind == "conversation" or spec.needs_retrieval:
+        pytest.skip("the canned chatbot keeps no conversation and returns no retrieved context")
+    # One golden per metric keeps a live run to one judged answer per metric.
     golden = spec.cases()[0]
-    reply = MockTargetClient().chat(golden["question"]).reply
-    metric = spec.build_metric(judge)
+    reply = CannedChatbot().chat(spec.prompt(golden)).reply
+    metric = spec.build_metric(judge, deepeval_threshold(spec, spec.threshold))
     metric.measure(spec.build_case(golden, reply))
     assert metric.is_successful(), f"{spec.key} scored {metric.score}: {metric.reason}"

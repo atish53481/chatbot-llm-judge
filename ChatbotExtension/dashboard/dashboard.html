@@ -7,39 +7,80 @@
   <link rel="stylesheet" href="../lib/theme.css">
   <link rel="stylesheet" href="dashboard.css">
 </head>
-<body>
+<body class="dash">
   <header class="topbar">
-    <h1>LLM Judge</h1>
-    <div class="filters" role="group" aria-label="Filters">
-      <label>Chatbot <select id="target-select"></select></label>
-      <label>Metric <select id="metric-select"></select></label>
-      <button id="run-button" type="button" class="primary">Run judge</button>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">◆</span>
+      <div>
+        <h1>DeepEval Dashboard</h1>
+        <p class="brand-sub">Live metric runs against the chatbot and RAG pipeline</p>
+      </div>
     </div>
-    <div class="segmented" role="group" aria-label="Dashboard view">
-      <button type="button" data-view="judge" aria-pressed="true">Judge</button>
-      <button type="button" data-view="history" aria-pressed="false">History</button>
+    <div class="header-controls">
+      <label>Target <select id="target-select"></select></label>
+      <label>Cases per run
+        <select id="cases-select">
+          <option value="1">1 case</option>
+          <option value="3">3 cases</option>
+          <option value="5">5 cases</option>
+          <option value="">All cases</option>
+        </select>
+      </label>
+      <label>Judge model <input id="judge-model" readonly title="Change it in the side panel's Judge settings"></label>
+      <div class="segmented view-switch" role="group" aria-label="Dashboard view">
+        <button type="button" data-view="judge" aria-pressed="true">Judge</button>
+        <button type="button" data-view="history" aria-pressed="false">History</button>
+      </div>
+      <button id="refresh-status" type="button" class="ghost">Refresh status</button>
+      <button id="run-all-button" type="button" class="primary">▶ Run all visible</button>
+      <button id="stop-button" type="button" class="danger hidden" title="Stop the batch (the judge call in progress finishes first)">■ Stop</button>
     </div>
-    <p id="status" class="secondary" role="status"></p>
   </header>
+  <p id="status" class="secondary" role="status"></p>
 
   <div id="judge-view">
-  <section id="status-strip" class="status-strip" aria-label="Status">
-    <div class="status-chip">
-      <span id="status-chatbot-dot" class="dot"></span>
-      <span id="status-chatbot-text">Chatbot —</span>
+  <section class="tiles" aria-label="Status">
+    <div class="tile">
+      <p class="tile-title"><span id="tile-chatbot-dot" class="dot dot-off"></span>Chatbot</p>
+      <p id="tile-chatbot-text" class="tile-mono">–</p>
     </div>
-    <div class="status-chip">
-      <span id="status-judge-dot" class="dot"></span>
-      <span id="status-judge-text">Judge —</span>
+    <div class="tile">
+      <p class="tile-title"><span id="tile-rag-dot" class="dot dot-off"></span>RAG</p>
+      <p id="tile-rag-text" class="tile-mono">–</p>
     </div>
-    <div class="status-chip">
-      <span id="status-goldens-text" class="muted">–</span>
+    <div class="tile">
+      <p class="tile-title"><span id="tile-judge-dot" class="dot dot-off"></span>Judge</p>
+      <p id="tile-judge-text" class="tile-mono">–</p>
     </div>
-    <div class="status-chip counts" aria-label="Latest run counts">
-      <span id="status-pass" class="count-pass">0 pass</span>
-      <span id="status-fail" class="count-fail">0 fail</span>
-      <span id="status-pending" class="count-pending">0 not run</span>
+    <div class="tile">
+      <p class="tile-title"><span class="dot dot-good"></span>Tokens used
+        <button id="tokens-reset" type="button" class="tile-reset">reset</button></p>
+      <p id="tile-tokens-total" class="tile-mono">0 total · 0 calls</p>
+      <p id="tile-tokens-split" class="tile-mono">target 0 · judge 0</p>
     </div>
+    <div class="tile">
+      <p class="tile-title"><span class="dot dot-good"></span>Average score</p>
+      <p id="tile-average" class="tile-big">–</p>
+      <p id="tile-average-note" class="tile-mono">latest run of each visible card</p>
+    </div>
+    <div class="tile tile-counts">
+      <p id="tile-counts-label" class="tile-mono">pass · fail · pending</p>
+      <div class="count-pills">
+        <span id="status-pass" class="pill pill-pass">0</span>
+        <span id="status-fail" class="pill pill-fail">0</span>
+        <span id="status-pending" class="pill pill-pending">0</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="chip-row">
+    <span class="muted">Categories:</span>
+    <div id="category-chips" class="chips" role="group" aria-label="Category"></div>
+  </div>
+
+  <section class="metric-section" aria-label="Metrics">
+    <div id="metric-grid" class="metric-grid"></div>
+    <p id="metric-grid-empty" class="muted hidden">Pick a chatbot to see its metrics.</p>
   </section>
 
   <main class="layout">
@@ -54,18 +95,10 @@
     </section>
 
     <section class="charts">
-      <div class="card metric-grid-card">
-        <div class="card-head">
-          <h2>Metrics</h2>
-          <div id="category-chips" class="chips" role="group" aria-label="Category"></div>
-        </div>
-        <div id="metric-grid" class="metric-grid"></div>
-        <p id="metric-grid-empty" class="muted hidden">Pick a chatbot to see its metrics.</p>
-      </div>
-
       <div class="card">
         <div class="card-head">
           <h2 id="trend-heading">Score trend across runs</h2>
+          <label class="inline-label">Metric <select id="metric-select"></select></label>
           <div class="segmented" role="group" aria-label="Trend view">
             <button type="button" data-trend-view="chart" aria-pressed="true">Chart</button>
             <button type="button" data-trend-view="table" aria-pressed="false">Table</button>
@@ -85,11 +118,12 @@
 
       <div class="card">
         <h2 id="cases-heading">Last run, case by case</h2>
+        <p id="cases-note" class="case-note hidden"></p>
         <p id="cases-empty" class="muted">Run the judge to see how each golden answer scored.</p>
         <div class="table-scroll">
           <table id="cases-table" class="hidden">
             <thead>
-              <tr><th>Question</th><th>Chatbot answer</th><th class="num">Score</th><th>Result</th><th>Judge's reason</th></tr>
+              <tr><th>Question</th><th>Actual result</th><th>Expected result</th><th>Context</th><th class="num">Score</th><th>Result</th><th>Why (judge's reason)</th></tr>
             </thead>
             <tbody></tbody>
           </table>

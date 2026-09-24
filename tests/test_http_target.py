@@ -1,158 +1,153 @@
+import json
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from unittest.mock import patch, MagicMock
-
 from backend.targets.http_client import HttpTargetClient
-from backend.targets import presets
+
+URL = "https://shop.example/api/chat"
 
 
-def _fake_response(json_body, status=200):
+def _config(**overrides):
+    config = {
+        "url": URL,
+        "method": "POST",
+        "headers": {"Content-Type": "application/json", "Cookie": "s=1", "Content-Length": "99"},
+        "body_template": '{"conversation_id": "c1", "message": "{{message}}"}',
+        "response_path": "data.text",
+    }
+    config.update(overrides)
+    return config
+
+
+def _response(text, content_type="application/json", status=200):
     resp = MagicMock()
     resp.status_code = status
-    resp.json.return_value = json_body
-    resp.raise_for_status = MagicMock()
+    resp.ok = status < 400
+    resp.text = text
+    resp.headers = {"Content-Type": content_type}
+    resp.json.side_effect = lambda: json.loads(text)
     return resp
 
 
-@patch("backend.targets.http_client.requests.post")
-def test_chat_extracts_reply_from_response_path(mock_post):
-    mock_post.return_value = _fake_response({"data": {"text": "hello there"}})
-    client = HttpTargetClient({
-        "base_url": "http://localhost:9999",
-        "chat_path": "/chat",
-        "message_field": "message",
-        "response_path": "data.text",
-    })
-    reply = client.chat("hi")
+@patch("backend.targets.http_client.requests.request")
+def test_fills_message_into_json_body_and_reads_reply(mock_request):
+    mock_request.return_value = _response('{"data": {"text": "hello there"}}')
+    reply = HttpTargetClient(_config()).chat('say "hi"\nnow')
     assert reply.reply == "hello there"
     assert reply.mode == "http"
-    sent_payload = mock_post.call_args.kwargs["json"]
-    assert sent_payload == {"message": "hi"}
+    method, url = mock_request.call_args.args
+    assert (method, url) == ("POST", URL)
+    sent = json.loads(mock_request.call_args.kwargs["data"])
+    assert sent == {"conversation_id": "c1", "message": 'say "hi"\nnow'}
+    headers = mock_request.call_args.kwargs["headers"]
+    assert headers["Cookie"] == "s=1"
+    assert "Content-Length" not in headers
 
 
-@patch("backend.targets.http_client.requests.get")
-def test_health_hits_health_path(mock_get):
-    mock_get.return_value = _fake_response({"status": "ok"})
-    client = HttpTargetClient({"base_url": "http://localhost:9999"})
-    assert client.health() == {"status": "ok"}
-    mock_get.assert_called_once_with("http://localhost:9999/health", timeout=10)
+@patch("backend.targets.http_client.requests.request")
+def test_form_body_is_url_encoded(mock_request):
+    mock_request.return_value = _response('{"answer": "ok"}')
+    config = _config(
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        body_template="q={{message}}&lang=en",
+        response_path="answer",
+    )
+    HttpTargetClient(config).chat("a b&c")
+    assert mock_request.call_args.kwargs["data"] == b"q=a+b%26c&lang=en"
 
 
-def test_openai_compatible_preset_shape():
-    config = presets.openai_compatible("http://localhost:8080", "sk-test")
-    client = HttpTargetClient(config)
-    assert client.headers["Authorization"] == "Bearer sk-test"
-    assert config["response_path"] == "choices.0.message.content"
-    assert config["request_format"] == "openai_messages"
-    assert config["model"] == "gpt-4o-mini"
+@patch("backend.targets.http_client.requests.request")
+def test_get_puts_message_in_url(mock_request):
+    mock_request.return_value = _response("plain answer", content_type="text/plain")
+    config = _config(method="GET", url=URL + "?q={{message}}", body_template="", response_path="")
+    reply = HttpTargetClient(config).chat("where is it?")
+    assert mock_request.call_args.args[1] == URL + "?q=where%20is%20it%3F"
+    assert mock_request.call_args.kwargs["data"] is None
+    assert reply.reply == "plain answer"
 
 
-@patch("backend.targets.http_client.requests.post")
-def test_openai_messages_format_posts_correct_payload(mock_post):
-    mock_post.return_value = _fake_response({"choices": [{"message": {"content": "hello"}}]})
-    config = presets.openai_compatible("http://localhost:8080", "sk-test", model="gpt-4o-mini")
-    client = HttpTargetClient(config)
-    reply = client.chat("hi")
-    assert reply.reply == "hello"
-
-    sent_payload = mock_post.call_args.kwargs["json"]
-    assert sent_payload == {
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": "hi"}],
-    }
+@patch("backend.targets.http_client.requests.request")
+def test_stream_joins_text_across_events(mock_request):
+    stream = (
+        'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    mock_request.return_value = _response(stream, content_type="text/event-stream")
+    reply = HttpTargetClient(_config(response_path="choices.0.delta.content")).chat("hi")
+    assert reply.reply == "Hello"
 
 
-@patch("backend.targets.http_client.requests.post")
-def test_openai_messages_format_prepends_history(mock_post):
-    mock_post.return_value = _fake_response({"choices": [{"message": {"content": "ok"}}]})
-    config = presets.openai_compatible("http://localhost:8080", "sk-test")
-    client = HttpTargetClient(config)
-
-    history = [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": "reply"},
-    ]
-    client.chat("second", history=history)
-
-    sent_payload = mock_post.call_args.kwargs["json"]
-    assert sent_payload["messages"] == [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": "reply"},
-        {"role": "user", "content": "second"},
-    ]
+@patch("backend.targets.http_client.requests.request")
+def test_missing_reply_path_shows_the_response(mock_request):
+    mock_request.return_value = _response('{"other": 1}')
+    with pytest.raises(ValueError, match=r"data\.text.*Response was: \{\"other\": 1\}"):
+        HttpTargetClient(_config()).chat("hi")
 
 
-def test_unknown_request_format_raises_valueerror():
-    try:
-        HttpTargetClient({
-            "base_url": "http://localhost:9999",
-            "request_format": "unknown",
-        })
-        assert False, "Should have raised ValueError"
-    except ValueError as e:
-        assert "request_format" in str(e)
-        assert "unknown" in str(e)
+@patch("backend.targets.http_client.requests.request")
+def test_http_error_shows_status_and_body(mock_request):
+    mock_request.return_value = _response("forbidden: csrf", content_type="text/plain", status=403)
+    with pytest.raises(ValueError, match="HTTP 403.*csrf"):
+        HttpTargetClient(_config()).chat("hi")
 
 
-@patch("backend.targets.http_client.requests.post")
-def test_list_shaped_response_is_supported(mock_post):
-    mock_post.return_value = _fake_response([{"generated_text": "hi from a list"}])
-    client = HttpTargetClient({"base_url": "http://localhost:9999", "response_path": "0.generated_text"})
-    reply = client.chat("hi")
-    assert reply.reply == "hi from a list"
-    assert reply.model == "unknown"
-
-
-@patch("backend.targets.http_client.requests.post")
-def test_missing_reply_path_names_the_path(mock_post):
-    mock_post.return_value = _fake_response({"data": {}})
-    client = HttpTargetClient({"base_url": "http://localhost:9999", "response_path": "data.text"})
-    with pytest.raises(ValueError, match="response_path 'data.text'"):
-        client.chat("hi")
-
-
-@pytest.mark.parametrize(
-    "config",
-    [
-        {},
-        {"base_url": 123},
-        {"base_url": "ftp://example.com"},
-        {"base_url": "http://localhost:9999", "headers": [{"Authorization": "x"}]},
-        {"base_url": "http://localhost:9999", "headers": {"Authorization": 5}},
-        {"base_url": "http://localhost:9999", "chat_path": 7},
-    ],
-)
+@pytest.mark.parametrize("config", [
+    _config(url="ftp://x"),
+    _config(url=None),
+    _config(body_template='{"message": "fixed"}'),
+    _config(method="DELETE"),
+    _config(method="GET", url=URL + "?q={{message}}"),
+    _config(headers={"x": 1}),
+    _config(response_path=3),
+])
 def test_invalid_config_raises_valueerror(config):
     with pytest.raises(ValueError):
         HttpTargetClient(config)
 
 
-@patch("backend.targets.http_client.requests.post")
-def test_flat_history_uses_the_configured_field(mock_post):
-    mock_post.return_value = _fake_response({"reply": "ok"})
-    history = [{"role": "user", "content": "first"}]
-    HttpTargetClient({"base_url": "http://localhost:9999", "history_field": "context"}).chat("x", history=history)
-    assert mock_post.call_args.kwargs["json"] == {"message": "x", "context": history}
-    HttpTargetClient({"base_url": "http://localhost:9999", "history_field": ""}).chat("x", history=history)
-    assert mock_post.call_args.kwargs["json"] == {"message": "x"}
+@patch("backend.targets.http_client.requests.request")
+def test_history_goes_where_the_body_keeps_it(mock_request):
+    mock_request.return_value = _response('{"data": {"text": "ok"}}')
+    config = _config(body_template='{"message": "{{message}}", "history": []}')
+    history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    HttpTargetClient(config).chat("again", history=history)
+    assert json.loads(mock_request.call_args.kwargs["data"]) == {"message": "again", "history": history}
 
 
-def test_openai_preset_drops_a_trailing_v1():
-    config = presets.openai_compatible("https://api.openai.com/v1/", "sk-test")
-    assert config["base_url"] == "https://api.openai.com"
-    assert config["chat_path"] == "/v1/chat/completions"
+@patch("backend.targets.http_client.requests.request")
+def test_chat_style_messages_get_history_before_the_question(mock_request):
+    mock_request.return_value = _response('{"choices": [{"message": {"content": "ok"}}]}')
+    config = _config(
+        body_template='{"model": "m", "messages": [{"role": "system", "content": "be nice"}, '
+                      '{"role": "user", "content": "{{message}}"}]}',
+        response_path="choices.0.message.content")
+    HttpTargetClient(config).chat("q2", history=[{"role": "user", "content": "q1"},
+                                                 {"role": "assistant", "content": "a1"}])
+    sent = json.loads(mock_request.call_args.kwargs["data"])["messages"]
+    assert [m["content"] for m in sent] == ["be nice", "q1", "a1", "q2"]
 
 
-def test_commandcode_preset_needs_only_a_key():
-    config = presets.commandcode("cmd-test")
-    assert config["base_url"] == "https://api.commandcode.ai/provider"
-    assert config["chat_path"] == "/v1/chat/completions"
-    assert config["model"] == presets.COMMANDCODE_DEFAULT_MODEL
-    assert config["headers"] == {"Authorization": "Bearer cmd-test"}
-    # The config must be accepted by the client it is written for.
-    assert HttpTargetClient(config).chat_path == "/v1/chat/completions"
+@patch("backend.targets.http_client.requests.request")
+def test_retrieved_context_is_read_from_context_path(mock_request):
+    mock_request.return_value = _response(json.dumps({
+        "data": {"text": "answer"},
+        "sources": [{"title": "Refunds", "content": "Refunds take 7 days."}, "Returns: 30 days."],
+    }))
+    reply = HttpTargetClient(_config(context_path="sources")).chat("q")
+    assert reply.retrieval_context == ["Refunds take 7 days.", "Returns: 30 days."]
+    assert HttpTargetClient(_config()).chat("q").retrieval_context is None
 
 
-def test_commandcode_preset_takes_a_model_override():
-    config = presets.commandcode("cmd-test", model="z-ai/glm-5.3-flash")
-    assert config["model"] == "z-ai/glm-5.3-flash"
+from backend import usage
+
+
+@patch("backend.targets.http_client.requests.request")
+def test_send_counts_a_target_call(mock_request):
+    usage.reset()
+    mock_request.return_value = _response('{"data": {"text": "ok"}}')
+    HttpTargetClient(_config()).chat("hi")
+    assert usage.snapshot()["target_calls"] == 1
+    usage.reset()

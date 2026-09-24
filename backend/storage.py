@@ -14,8 +14,6 @@ from typing import Any
 
 _LOCK = threading.RLock()
 
-SAMPLE_TARGET = ("Sample chatbot", "mock", {"theme": "general_support"})
-
 
 def init_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
@@ -39,10 +37,14 @@ def init_db(path: str) -> sqlite3.Connection:
                 metric_key TEXT NOT NULL,
                 score REAL,
                 passed INTEGER NOT NULL,
-                ts TEXT NOT NULL
+                ts TEXT NOT NULL,
+                cases_run INTEGER
             )
             """
         )
+        # Databases from before cases-per-run have no cases_run column.
+        if "cases_run" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
+            conn.execute("ALTER TABLE runs ADD COLUMN cases_run INTEGER")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_target_metric ON runs (target_id, metric_key)"
         )
@@ -59,34 +61,70 @@ def init_db(path: str) -> sqlite3.Connection:
             """
         )
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        _migrate_targets(conn)
         conn.commit()
     return conn
 
 
-def seed_sample_target_once(conn: sqlite3.Connection) -> None:
-    """Adds the sample chatbot to a brand-new database, and never again.
-
-    The seed is remembered in meta, so a user who deletes the sample does
-    not get it back on the next start.
-    """
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
     with _LOCK:
-        if conn.execute("SELECT 1 FROM meta WHERE key = 'sample_seeded'").fetchone():
-            return
-        if conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 0:
-            name, type_, config = SAMPLE_TARGET
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str | None) -> None:
+    """Stores a setting; None removes it."""
+    with _LOCK:
+        if value is None:
+            conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+        else:
             conn.execute(
-                "INSERT INTO targets (name, type, config_json) VALUES (?, ?, ?)",
-                (name, type_, json.dumps(config)),
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
             )
-        conn.execute("INSERT INTO meta (key, value) VALUES ('sample_seeded', '1')")
         conn.commit()
 
 
-def has_dom_session(conn: sqlite3.Connection, session_id: str) -> bool:
-    """True when a web-page chatbot relays through the page host session_id."""
-    with _LOCK:
-        rows = conn.execute("SELECT config_json FROM targets WHERE type = 'dom'").fetchall()
-    return any(json.loads(r["config_json"]).get("session_id") == session_id for r in rows)
+def _legacy_to_template(config: dict) -> dict:
+    """Rewrites a pre-cURL HTTP config (base_url + chat_path + message_field,
+    or the OpenAI messages shape) as the url + body_template the connector uses."""
+    if "url" in config or "base_url" not in config:
+        return config
+    url = config["base_url"].rstrip("/") + config.get("chat_path", "/chat")
+    if config.get("request_format") == "openai_messages":
+        body = {"messages": [{"role": "user", "content": "{{message}}"}]}
+        if config.get("model"):
+            body["model"] = config["model"]
+    else:
+        body = {config.get("message_field", "message"): "{{message}}"}
+    migrated = {
+        "url": url,
+        "method": "POST",
+        "headers": {"Content-Type": "application/json", **config.get("headers", {})},
+        "body_template": json.dumps(body),
+        "response_path": config.get("response_path", "reply"),
+    }
+    if "theme" in config:
+        migrated["theme"] = config["theme"]
+    return migrated
+
+
+def _migrate_targets(conn: sqlite3.Connection) -> None:
+    """Only cURL-style HTTP chatbots remain: legacy HTTP configs are rewritten,
+    and the retired sample (mock) and web-page (dom) chatbots are removed."""
+    retired = [r["id"] for r in conn.execute("SELECT id FROM targets WHERE type != 'http'")]
+    for target_id in retired:
+        conn.execute("DELETE FROM runs WHERE target_id = ?", (target_id,))
+        conn.execute("DELETE FROM targets WHERE id = ?", (target_id,))
+    for row in conn.execute("SELECT id, config_json FROM targets").fetchall():
+        config = json.loads(row["config_json"])
+        migrated = _legacy_to_template(config)
+        if migrated is not config:
+            conn.execute(
+                "UPDATE targets SET config_json = ? WHERE id = ?",
+                (json.dumps(migrated), row["id"]),
+            )
 
 
 def _target_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -156,11 +194,13 @@ def record_run(
     score: float | None,
     passed: bool,
     ts: str,
+    cases_run: int | None = None,
 ) -> int:
     with _LOCK:
         cur = conn.execute(
-            "INSERT INTO runs (target_id, metric_key, score, passed, ts) VALUES (?, ?, ?, ?, ?)",
-            (target_id, metric_key, score, int(passed), ts),
+            "INSERT INTO runs (target_id, metric_key, score, passed, ts, cases_run)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (target_id, metric_key, score, int(passed), ts, cases_run),
         )
         conn.commit()
         return cur.lastrowid

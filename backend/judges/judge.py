@@ -13,6 +13,8 @@ import time
 from deepeval.models import LocalModel
 from dotenv import load_dotenv
 
+from backend import usage
+
 load_dotenv()
 
 JUDGE_MODEL_ENV = "JUDGE_MODEL"
@@ -55,21 +57,55 @@ class GroqJudge(LocalModel):
         # Same lock and rate-limit backoff as the sync path.
         return await asyncio.to_thread(self.generate, *args, **kwargs)
 
+    def load_model(self, async_mode: bool = False):
+        # LocalModel.generate reads only the reply text, so the usage the
+        # response carries is picked up here, on the client it calls.
+        client = super().load_model(async_mode=async_mode)
+        if async_mode:
+            return client  # a_generate goes through the sync path above
+        create = client.chat.completions.create
+        if getattr(create, "counts_usage", False):
+            return client  # already wrapped: DeepEval loads the model at init and per call
 
-def build_judge() -> GroqJudge:
-    api_key = os.getenv(JUDGE_API_KEY_ENV, "")
-    if not api_key:
+        def counted(*args, **kwargs):
+            response = create(*args, **kwargs)
+            usage.record_judge(getattr(response, "usage", None))
+            return response
+
+        counted.counts_usage = True
+        client.chat.completions.create = counted
+        return client
+
+
+def judge_config(
+    api_key: str | None = None, model: str | None = None, base_url: str | None = None
+) -> dict:
+    """The judge's settings: values passed in (saved from the side panel) win,
+    then the environment / .env, then the defaults."""
+    return {
+        "api_key": api_key or os.getenv(JUDGE_API_KEY_ENV, ""),
+        "model": model or os.getenv(JUDGE_MODEL_ENV, DEFAULT_MODEL),
+        "base_url": base_url or os.getenv(JUDGE_BASE_URL_ENV, DEFAULT_BASE_URL),
+    }
+
+
+def build_judge(
+    api_key: str | None = None, model: str | None = None, base_url: str | None = None
+) -> GroqJudge:
+    config = judge_config(api_key, model, base_url)
+    if not config["api_key"]:
         raise RuntimeError(
-            f"{JUDGE_API_KEY_ENV} is not set. Add it to your environment or .env file."
+            f"{JUDGE_API_KEY_ENV} is not set. Add the judge's API key in the side panel "
+            "(Judge settings) or in the .env file."
         )
     return GroqJudge(
-        model=os.getenv(JUDGE_MODEL_ENV, DEFAULT_MODEL),
-        api_key=api_key,
-        base_url=os.getenv(JUDGE_BASE_URL_ENV, DEFAULT_BASE_URL),
+        model=config["model"],
+        api_key=config["api_key"],
+        base_url=config["base_url"],
         temperature=0.0,
         format="json",
     )
 
 
-def judge_name() -> str:
-    return os.getenv(JUDGE_MODEL_ENV, DEFAULT_MODEL)
+def judge_name(model: str | None = None) -> str:
+    return judge_config(model=model)["model"]

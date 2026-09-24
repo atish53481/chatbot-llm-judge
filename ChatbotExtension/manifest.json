@@ -13,7 +13,12 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["sidePanel", "storage", "scripting", "tabs"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
-  "optional_host_permissions": ["http://*/*", "https://*/*"]
+  "permissions": [
+    "sidePanel",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ]
 }

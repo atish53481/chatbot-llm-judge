@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import threading
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -12,28 +14,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
-from backend import storage
-from backend.dashboard.runner import judge_one, run_spec
+from backend import storage, usage
+from backend.dashboard.runner import RunCancelled, judge_one, run_spec
+from backend.datasets import conversations as conversations_store
 from backend.datasets import goldens as goldens_store
-from backend.judges.judge import build_judge, judge_name
-from backend.metrics_catalog import ALL_SPECS, DEFAULT_THEME, SPECS_BY_KEY
-from backend.rag.generate import generate_goldens_from_document
-from backend.targets import presets
+from backend.datasets import security_probes as probes_store
+from backend.judges.judge import build_judge, judge_config
+from backend.metrics_catalog import (
+    ALL_SPECS, DEFAULT_THEME, ENVIRONMENTS, GROUPS, SPECS_BY_KEY, UI_CATEGORIES, UI_CATEGORY_LABELS,
+)
+from backend.rag.fetch import fetch_page_text
 from backend.targets.base import ChatbotClient
-from backend.targets.dom_relay import DomRelayTargetClient, RelayQueue
-from backend.targets.http_client import HttpTargetClient
-from backend.targets.mock import MockTargetClient
+from backend.targets.curl import (
+    MESSAGE_PLACEHOLDER,
+    find_context_path,
+    find_history_path,
+    find_reply_path,
+    find_stream_reply_path,
+    parse_curl,
+    prepare_body,
+    prepare_url,
+)
+from backend.targets.http_client import HttpTargetClient, is_stream, sse_events
 
 DB_PATH = os.getenv("JUDGE_DB_PATH", "judge.db")
-TARGET_TYPES = ("mock", "http", "dom")
+TARGET_TYPES = ("http",)
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".txt", ".docx", ".md", ".markdown", ".mdx"}
 DOCUMENTS_DIR = Path(__file__).resolve().parent.parent / "datasets" / "documents"
-PRESETS = {
-    "openai_compatible": presets.openai_compatible,
-    "commandcode": presets.commandcode,
-}
-PRESET_ARGS = ("base_url", "api_key", "model")
-RELAY_WAIT_SECONDS = 20.0  # long-poll window, under the extension worker's 30s idle limit
 
 
 def extension_origin_regex(extension_id: str | None) -> str:
@@ -41,6 +48,14 @@ def extension_origin_regex(extension_id: str | None) -> str:
     if extension_id:
         return rf"^chrome-extension://{re.escape(extension_id)}$"
     return r"^chrome-extension://[a-z]{32}$"
+
+
+def generate_goldens_from_document(*args, **kwargs) -> int:
+    # Imported on first use: sentence-transformers/transformers take ~40s to
+    # import, which would otherwise stall server startup.
+    from backend.rag.generate import generate_goldens_from_document as generate
+
+    return generate(*args, **kwargs)
 
 
 app = FastAPI(title="Chrome Sidebar LLM Judge")
@@ -58,15 +73,34 @@ app.add_middleware(
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
 _conn = storage.init_db(DB_PATH)
-storage.seed_sample_target_once(_conn)
-_relay_queue = RelayQueue()
+# Progress of runs in flight, keyed by the caller's run_id (see /api/run/progress),
+# and the ones asked to stop (see /api/run/cancel).
+_progress: dict[str, dict] = {}
+_cancelled: set[str] = set()
+_progress_lock = threading.Lock()
 
 
 class TargetCreate(BaseModel):
     name: str = Field(min_length=1)
-    type: str
+    type: str = "http"
     config: dict = Field(default_factory=dict)
-    preset: str | None = None
+
+
+class CurlParseRequest(BaseModel):
+    curl: str = Field(min_length=1, max_length=200_000)
+    # The question typed on the site when the request was captured; found
+    # automatically when empty. It is swapped for {{message}}.
+    sample_message: str = ""
+    # Send the captured question once to find where the reply sits.
+    probe: bool = True
+
+
+class TargetTest(BaseModel):
+    type: str = "http"
+    config: dict = Field(default_factory=dict)
+    message: str = Field(default="Hello", min_length=1)
+    # Editing: reuse the stored headers when the form sends none (they are masked).
+    target_id: int | None = None
 
 
 class GoldenCreate(BaseModel):
@@ -80,17 +114,16 @@ class GoldenCreate(BaseModel):
 class RunRequest(BaseModel):
     target_id: int
     metric_key: str
+    # Pass mark for this run only; the catalog default applies when omitted.
+    threshold: float | None = Field(default=None, ge=0, le=1)
+    # Chosen by the caller so it can poll /api/run/progress while the run works.
+    run_id: str | None = Field(default=None, max_length=64)
+    # Cases per run from the dashboard; None = every case in the dataset.
+    limit: int | None = Field(default=None, ge=1)
 
 
-class RelayMessage(BaseModel):
-    session_id: str = Field(min_length=1)
-    question_id: str = Field(min_length=1)
-    text: str = Field(max_length=20000)
-
-
-class RelayPoll(BaseModel):
-    session_id: str = Field(min_length=1)
-    wait_seconds: float = Field(default=RELAY_WAIT_SECONDS, ge=0, le=25)
+class RunCancel(BaseModel):
+    run_id: str = Field(min_length=1, max_length=64)
 
 
 class JudgeOneRequest(BaseModel):
@@ -100,6 +133,7 @@ class JudgeOneRequest(BaseModel):
     theme: str | None = None
     expected_answer: str = ""
     context: list[str] = Field(default_factory=list)
+    threshold: float | None = Field(default=None, ge=0, le=1)
 
 
 class ChatTurn(BaseModel):
@@ -114,14 +148,8 @@ class ChatRequest(BaseModel):
 
 
 def _build_target(row: dict) -> ChatbotClient:
-    config = row["config"]
-    if row["type"] == "mock":
-        return MockTargetClient(theme=config.get("theme", DEFAULT_THEME))
     if row["type"] == "http":
-        return HttpTargetClient(config)
-    if row["type"] == "dom":
-        session_id = config.get("session_id") or str(row["id"])
-        return DomRelayTargetClient(session_id=session_id, queue=_relay_queue)
+        return HttpTargetClient(row["config"])
     raise ValueError(f"unknown target type {row['type']!r}")
 
 
@@ -147,25 +175,155 @@ def _public(row: dict) -> dict:
     return {**row, "config": config}
 
 
-def _apply_preset(body: TargetCreate) -> dict:
-    """Expand a named preset into a full HTTP config (see targets/presets.py)."""
-    if body.preset is None:
-        return body.config
-    if body.type != "http" or body.preset not in PRESETS:
-        raise HTTPException(
-            status_code=400, detail=f"unknown preset {body.preset!r} for type {body.type!r}"
-        )
-    args = {k: v for k, v in body.config.items() if k in PRESET_ARGS}
-    extras = {k: v for k, v in body.config.items() if k not in PRESET_ARGS}
+def _keep_stored_headers(config: dict, existing: dict | None) -> dict:
+    """The extension only ever sees masked headers, so an edit that sends none
+    keeps the stored ones (cookies, API keys) instead of wiping them."""
+    if existing is None or "headers" in config:
+        return config
+    stored = existing["config"].get("headers")
+    return {**config, "headers": stored} if stored else config
+
+
+@app.post("/api/targets/parse-curl")
+def api_parse_curl(body: CurlParseRequest):
     try:
-        return {**extras, **PRESETS[body.preset](**args)}
-    except TypeError as e:  # base_url or api_key missing
-        raise HTTPException(status_code=400, detail=f"preset {body.preset}: {e}") from e
+        parsed = parse_curl(body.curl)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    body_template, message = prepare_body(parsed["body"], body.sample_message)
+    url = parsed["url"]
+    if MESSAGE_PLACEHOLDER not in body_template:
+        url, message = prepare_url(url, body.sample_message)
+    result = {
+        "url": url,
+        "method": parsed["method"],
+        "headers": parsed["headers"],
+        "body_template": body_template,
+        "sample_message": message,
+        "message_marked": MESSAGE_PLACEHOLDER in url + body_template,
+        "response_path": "",
+        "context_path": "",
+        "history_path": find_history_path(body_template),
+        "reply_preview": "",
+        "probe_error": None,
+    }
+    if result["message_marked"] and body.probe:
+        result.update(_probe_reply_path(result, message))
+    return result
+
+
+def _probe_reply_path(parsed: dict, message: str) -> dict:
+    """Sends the captured question once and finds where the reply sits in the answer."""
+    config = {k: parsed[k] for k in ("url", "method", "headers", "body_template")}
+    try:
+        client = HttpTargetClient(config)
+        response = client.send(message or "Hello")
+        context_path = ""
+        if is_stream(response):
+            path = find_stream_reply_path(sse_events(response.text))
+        else:
+            try:
+                data = response.json()
+                path = find_reply_path(data)
+                # Retrieved documents, when the chatbot returns them (RAG metrics).
+                context_path = find_context_path(data)
+            except ValueError:
+                path = ""  # plain-text answer: the whole body is the reply
+        client.response_path = path
+        reply = client.read_reply(response).reply
+    except Exception as e:  # noqa: BLE001 - the fields are still filled; the user can fix the path
+        return {"probe_error": f"{type(e).__name__}: {e}"}
+    return {"response_path": path, "context_path": context_path, "reply_preview": reply[:500]}
+
+
+@app.post("/api/targets/test")
+def api_test_target(body: TargetTest):
+    """Sends one question with an unsaved config, so the form can be checked first."""
+    if body.type not in TARGET_TYPES:
+        raise HTTPException(
+            status_code=400, detail=f"type must be one of: {', '.join(TARGET_TYPES)}"
+        )
+    existing = storage.get_target(_conn, body.target_id) if body.target_id else None
+    config = _keep_stored_headers(body.config, existing)
+    client = _client_or_400({"id": body.target_id or 0, "type": body.type, "config": config})
+    try:
+        reply = client.chat(body.message)
+    except Exception as e:  # noqa: BLE001 - any chatbot failure is shown in the form
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "reply": reply.reply}
+
+
+# Judge settings saved from the side panel (meta table) override .env.
+_JUDGE_META = {"api_key": "judge_api_key", "model": "judge_model", "base_url": "judge_base_url"}
+
+
+def _judge_overrides() -> dict:
+    stored = {name: storage.get_meta(_conn, key) for name, key in _JUDGE_META.items()}
+    return {name: value for name, value in stored.items() if value}
+
+
+def _key_hint(api_key: str) -> str:
+    return f"••••{api_key[-4:]}" if len(api_key) > 8 else ("••••" if api_key else "")
+
+
+class JudgeSettings(BaseModel):
+    # Empty api_key keeps the saved one (it is never sent back to the extension).
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(default="", max_length=200)
+    base_url: str = Field(default="", max_length=500)
+    clear_key: bool = False
+
+
+@app.get("/api/judge/settings")
+def api_get_judge_settings():
+    overrides = _judge_overrides()
+    config = judge_config(**overrides)
+    return {
+        "model": config["model"],
+        "base_url": config["base_url"],
+        "has_key": bool(config["api_key"]),
+        "key_hint": _key_hint(config["api_key"]),
+        # "panel" when saved from the side panel, "env" when it comes from .env.
+        "key_source": "panel" if "api_key" in overrides else ("env" if config["api_key"] else None),
+    }
+
+
+@app.put("/api/judge/settings")
+def api_put_judge_settings(body: JudgeSettings):
+    base_url = body.base_url.strip()
+    if base_url and not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="base URL must start with http:// or https://")
+    if body.clear_key:
+        storage.set_meta(_conn, _JUDGE_META["api_key"], None)
+    elif body.api_key.strip():
+        storage.set_meta(_conn, _JUDGE_META["api_key"], body.api_key.strip())
+    # Empty model / base URL fall back to .env and the defaults.
+    storage.set_meta(_conn, _JUDGE_META["model"], body.model.strip() or None)
+    storage.set_meta(_conn, _JUDGE_META["base_url"], base_url or None)
+    return api_get_judge_settings()
+
+
+@app.post("/api/judge/settings/test")
+def api_test_judge_settings(body: JudgeSettings):
+    """One small call to the judge with the form's values (saved key if none typed)."""
+    overrides = _judge_overrides()
+    for name in ("api_key", "model", "base_url"):
+        value = getattr(body, name).strip()
+        if value:
+            overrides[name] = value
+    try:
+        judge = build_judge(**overrides)
+        reply = judge.generate('Reply with this JSON only: {"ok": true}')
+    except Exception as e:  # noqa: BLE001 - shown in the settings form
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:400]}"}
+    text = reply[0] if isinstance(reply, tuple) else reply
+    return {"ok": True, "model": judge_config(**overrides)["model"], "reply": str(text)[:200]}
 
 
 @app.get("/api/status")
 def api_status():
-    return {"judge": {"model": judge_name(), "up": bool(os.getenv("JUDGE_API_KEY"))}}
+    config = judge_config(**_judge_overrides())
+    return {"judge": {"model": config["model"], "up": bool(config["api_key"])}}
 
 
 @app.get("/api/targets")
@@ -179,7 +337,7 @@ def api_create_target(body: TargetCreate):
         raise HTTPException(
             status_code=400, detail=f"type must be one of: {', '.join(TARGET_TYPES)}"
         )
-    config = _apply_preset(body)
+    config = body.config
     # Build the client once so a broken config is rejected before it is stored.
     _client_or_400({"id": 0, "type": body.type, "config": config})
     target_id = storage.add_target(_conn, body.name, body.type, config)
@@ -188,14 +346,14 @@ def api_create_target(body: TargetCreate):
 
 @app.put("/api/targets/{target_id}")
 def api_update_target(target_id: int, body: TargetCreate):
-    _target_or_404(target_id)
+    existing = _target_or_404(target_id)
     if body.type not in TARGET_TYPES:
         raise HTTPException(
             status_code=400, detail=f"type must be one of: {', '.join(TARGET_TYPES)}"
         )
-    config = _apply_preset(body)
+    config = _keep_stored_headers(body.config, existing)
     # Build the client once so a broken config is rejected before it is stored;
-    # same validation POST does, so switching e.g. dom -> http here is just as safe.
+    # same validation POST does.
     _client_or_400({"id": target_id, "type": body.type, "config": config})
     storage.update_target(_conn, target_id, body.name, body.type, config)
     return _public(storage.get_target(_conn, target_id))
@@ -218,7 +376,7 @@ def api_clear_target_runs(target_id: int):
 @app.post("/api/documents")
 def api_upload_document(theme: str = Form(...), file: UploadFile = File(...)):
     try:
-        judge = build_judge()
+        judge = build_judge(**_judge_overrides())
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     safe_filename = Path(file.filename or "document").name
@@ -244,6 +402,38 @@ def api_upload_document(theme: str = Form(...), file: UploadFile = File(...)):
     return {**storage.get_document(_conn, document_id), "goldens_created": created}
 
 
+class UrlDocument(BaseModel):
+    theme: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    url: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/api/documents/url")
+def api_document_from_url(body: UrlDocument):
+    """Fetches a help / FAQ page, keeps its text as the theme's reference
+    document, and generates goldens from it like an uploaded file."""
+    try:
+        judge = build_judge(**_judge_overrides())
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    try:
+        text, final_url = fetch_page_text(body.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    document_id = storage.add_document(_conn, body.theme, final_url)
+    theme_dir = DOCUMENTS_DIR / body.theme
+    theme_dir.mkdir(parents=True, exist_ok=True)
+    host = re.sub(r"[^A-Za-z0-9.-]", "_", urlparse(final_url).netloc) or "page"
+    dest = theme_dir / f"{document_id}_{host}.txt"
+    dest.write_text(text, encoding="utf-8")
+    try:
+        created = generate_goldens_from_document(str(dest), body.theme, final_url, judge)
+        storage.set_document_status(_conn, document_id, "ready")
+    except Exception as e:  # noqa: BLE001 - any generation failure is reported, not a 500
+        storage.set_document_status(_conn, document_id, "error", f"{type(e).__name__}: {e}")
+        return {**storage.get_document(_conn, document_id), "goldens_created": 0}
+    return {**storage.get_document(_conn, document_id), "goldens_created": created}
+
+
 @app.get("/api/documents")
 def api_list_documents(theme: str | None = None):
     return storage.list_documents(_conn, theme)
@@ -260,6 +450,125 @@ def api_delete_document(document_id: int):
 @app.get("/api/goldens")
 def api_list_goldens(theme: str | None = None):
     return goldens_store.load_goldens(theme=theme)
+
+
+class GoldenReset(BaseModel):
+    """Empty on purpose: a JSON body forces the CORS preflight, like every other POST."""
+
+
+@app.post("/api/goldens/reset")
+def api_reset_goldens(_body: GoldenReset):
+    """Restores the shipped golden sets, conversation scenarios and security
+    probes; the side panel calls this on every load, so edits last one session."""
+    return {
+        "restored": goldens_store.reset_to_defaults(),
+        "conversations_restored": conversations_store.reset_to_defaults(),
+        "probes_restored": probes_store.reset_to_defaults(),
+    }
+
+
+class ConversationCreate(BaseModel):
+    theme: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=200)
+    scenario: str = Field(default="", max_length=2000)
+    chatbot_role: str = Field(default="", max_length=500)
+    expected_outcome: str = Field(default="", max_length=2000)
+    user_turns: list[str] = Field(min_length=1, max_length=20)
+
+
+def _conversation_fields(body: ConversationCreate) -> dict:
+    if not any(turn.strip() for turn in body.user_turns):
+        raise HTTPException(status_code=400, detail="a scenario needs at least one user turn")
+    return body.model_dump()
+
+
+@app.get("/api/conversations")
+def api_list_conversations(theme: str | None = None):
+    return conversations_store.load_conversations(theme=theme)
+
+
+@app.post("/api/conversations")
+def api_create_conversation(body: ConversationCreate):
+    return conversations_store.add_conversation(_conversation_fields(body))
+
+
+@app.put("/api/conversations/{conversation_id}")
+def api_update_conversation(conversation_id: str, body: ConversationCreate):
+    row = conversations_store.update_conversation(conversation_id, _conversation_fields(body))
+    if row is None:
+        raise HTTPException(status_code=404, detail="conversation scenario not found")
+    return row
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def api_delete_conversation(conversation_id: str):
+    if not conversations_store.delete_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="conversation scenario not found")
+    return {"deleted": conversation_id}
+
+
+@app.post("/api/conversations/reset")
+def api_reset_conversations(_body: GoldenReset):
+    return {"restored": conversations_store.reset_to_defaults()}
+
+
+class ProbeFields(BaseModel):
+    metric: str = Field(min_length=1, max_length=64)
+    question: str = Field(min_length=1, max_length=2000)
+    note: str = Field(default="", max_length=500)
+    set: str = Field(default="ecommerce", max_length=32)
+
+
+@app.get("/api/security-probes")
+def api_list_probes(metric: str | None = None, probe_set: str | None = None):
+    return probes_store.load_probes(metric=metric, probe_set=probe_set)
+
+
+@app.post("/api/security-probes")
+def api_add_probe(body: ProbeFields):
+    try:
+        return probes_store.add_probe(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.put("/api/security-probes/{probe_id}")
+def api_update_probe(probe_id: str, body: ProbeFields):
+    try:
+        row = probes_store.update_probe(probe_id, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if row is None:
+        raise HTTPException(status_code=404, detail="probe not found")
+    return row
+
+
+@app.delete("/api/security-probes/{probe_id}")
+def api_delete_probe(probe_id: str):
+    if not probes_store.delete_probe(probe_id):
+        raise HTTPException(status_code=404, detail="probe not found")
+    return {"deleted": probe_id}
+
+
+@app.post("/api/security-probes/reset")
+def api_reset_probes(_body: GoldenReset):
+    return {"restored": probes_store.reset_to_defaults()}
+
+
+class UsageReset(BaseModel):
+    """Empty on purpose: a JSON body forces the CORS preflight, like every other POST."""
+
+
+@app.get("/api/usage")
+def api_usage():
+    """Judge tokens and calls since the backend started (or the last reset)."""
+    return usage.snapshot()
+
+
+@app.post("/api/usage/reset")
+def api_usage_reset(_body: UsageReset):
+    usage.reset()
+    return usage.snapshot()
 
 
 @app.post("/api/goldens")
@@ -291,12 +600,58 @@ def api_delete_golden(golden_id: str):
     return {"deleted": golden_id}
 
 
+def _cases_available(spec, theme: str, persona: str, probe_set: str) -> int:
+    try:
+        return len(spec.cases(theme=theme, persona=persona, probe_set=probe_set))
+    except Exception:  # noqa: BLE001 - a broken dataset shows as 0 cases, not a 500
+        return 0
+
+
 @app.get("/api/metrics")
-def api_list_metrics():
+def api_list_metrics(target_id: int | None = None):
+    """The catalog as the UI shows it: grouped, with direction, default threshold,
+    a threshold per environment (Local / PR / Staging / Production), the card
+    copy, and how many cases each metric would run for the given target (its
+    theme and persona)."""
+    theme, persona, probe_set = DEFAULT_THEME, "", ""
+    if target_id is not None:
+        config = _target_or_404(target_id)["config"]
+        theme = config.get("theme") or DEFAULT_THEME
+        persona = config.get("persona", "")
+        probe_set = config.get("probe_set", "")
     return [
-        {"key": s.key, "title": s.title, "threshold": s.threshold, "category": s.category}
-        for s in ALL_SPECS
+        {
+            "key": s.key,
+            "title": s.title,
+            "threshold": s.threshold,
+            "category": s.group,
+            "group": s.group,
+            "group_label": GROUPS[s.group],
+            "direction": s.direction,
+            "description": s.description,
+            "kind": s.kind,
+            "needs_retrieval": s.needs_retrieval,
+            # What the judge reads for this metric, and the G-Eval rubric if it has one.
+            "scores_on": list(s.scores_on),
+            "criteria": s.criteria,
+            "presets": s.presets(),
+            "ui_category": s.ui_category,
+            "ui_category_label": UI_CATEGORY_LABELS[s.ui_category],
+            "scale_hint": s.scale_hint,
+            "question": s.question,
+            "dataset": s.dataset_name,
+            "cases_available": _cases_available(s, theme, persona, probe_set),
+            # Which security probe set this target sends (None for other datasets).
+            "probe_set": (probe_set or "ecommerce") if s.dataset_name == "security_probes" else None,
+        }
+        # Grouped the way both UIs show them: by dashboard category, in chip order.
+        for s in sorted(ALL_SPECS, key=lambda spec: UI_CATEGORIES.index(spec.ui_category))
     ]
+
+
+@app.get("/api/metrics/environments")
+def api_metric_environments():
+    return [{"key": key, "label": label} for key, label in ENVIRONMENTS.items()]
 
 
 @app.post("/api/run")
@@ -307,11 +662,49 @@ def api_run(req: RunRequest):
         raise HTTPException(status_code=404, detail="metric not found")
     target = _client_or_400(row)
     try:
-        judge = build_judge()
+        judge = build_judge(**_judge_overrides())
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     theme = row["config"].get("theme") or DEFAULT_THEME
-    return run_spec(spec, judge, target, req.target_id, _conn, theme=theme)
+
+    def on_progress(done: int, total: int, phase: str, question: str) -> None:
+        if req.run_id:
+            with _progress_lock:
+                if req.run_id in _cancelled:
+                    raise RunCancelled()
+                _progress[req.run_id] = {
+                    "done": done, "total": total, "phase": phase, "question": question,
+                }
+
+    try:
+        return run_spec(
+            spec, judge, target, req.target_id, _conn, theme=theme, threshold=req.threshold,
+            on_progress=on_progress, persona=row["config"].get("persona", ""), limit=req.limit,
+            probe_set=row["config"].get("probe_set", ""),
+        )
+    finally:
+        if req.run_id:
+            with _progress_lock:
+                _progress.pop(req.run_id, None)
+                _cancelled.discard(req.run_id)
+
+
+@app.post("/api/run/cancel")
+def api_run_cancel(body: RunCancel):
+    """Stops a running /api/run at its next step (the judge call in flight finishes first)."""
+    with _progress_lock:
+        active = body.run_id in _progress
+        # Remembered even before the run reports in, so an early Stop still lands.
+        _cancelled.add(body.run_id)
+    return {"cancelling": active}
+
+
+@app.get("/api/run/progress")
+def api_run_progress(run_id: str):
+    """Where a running /api/run is: `done` of `total` goldens, and what it is doing."""
+    with _progress_lock:
+        state = _progress.get(run_id)
+    return {"active": state is not None, **(state or {})}
 
 
 @app.post("/api/judge")
@@ -335,10 +728,13 @@ def api_judge(body: JudgeOneRequest):
             expected = expected or golden["expected_answer"]
             context = context or golden["context"]
     try:
-        judge = build_judge()
+        judge = build_judge(**_judge_overrides())
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-    return judge_one(spec, judge, body.question, body.actual_output, expected, context)
+    return judge_one(
+        spec, judge, body.question, body.actual_output, expected, context,
+        threshold=body.threshold,
+    )
 
 
 @app.post("/api/chat")
@@ -361,23 +757,3 @@ def api_runs_latest(target_id: int):
 def api_history(target_id: int, metric_key: str):
     return storage.history(_conn, target_id, metric_key)
 
-
-def _known_session_or_404(session_id: str) -> None:
-    # Tells a page that no longer backs a web-page chatbot to stop relaying.
-    if not storage.has_dom_session(_conn, session_id):
-        raise HTTPException(status_code=404, detail="no web-page chatbot uses this page")
-
-
-@app.post("/api/relay")
-def api_relay(body: RelayMessage):
-    _known_session_or_404(body.session_id)
-    _relay_queue.push(body.session_id, body.question_id, body.text)
-    return {"relayed": True}
-
-
-@app.post("/api/relay/next")
-def api_relay_next(body: RelayPoll):
-    # Long-poll: waits up to wait_seconds for the next question for this page.
-    _known_session_or_404(body.session_id)
-    question = _relay_queue.wait_question(body.session_id, body.wait_seconds)
-    return question or {"id": None, "question": None}

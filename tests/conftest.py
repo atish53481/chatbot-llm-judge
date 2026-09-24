@@ -23,3 +23,23 @@ def fixed_goldens(request, tmp_path, monkeypatch):
     copy = tmp_path / "fixture-goldens.json"
     shutil.copyfile(FIXTURE_GOLDENS, copy)
     monkeypatch.setattr(goldens, "GOLDENS_PATH", str(copy))
+
+
+@pytest.fixture(autouse=True)
+def fixed_conversations(tmp_path, monkeypatch):
+    """Tests edit a throwaway copy of the conversation scenarios, never the user's."""
+    from backend.datasets import conversations
+
+    monkeypatch.setattr(conversations, "CONVERSATIONS_PATH", str(tmp_path / "conversations.json"))
+
+
+FIXTURE_PROBES = Path(__file__).parent / "data" / "security_probes.json"
+
+
+@pytest.fixture(autouse=True)
+def fixed_security_probes(tmp_path, monkeypatch):
+    """Tests edit a throwaway copy of the probes; defaults point at the fixture."""
+    from backend.datasets import security_probes
+
+    monkeypatch.setattr(security_probes, "PROBES_PATH", str(tmp_path / "security_probes.json"))
+    monkeypatch.setattr(security_probes, "DEFAULT_PROBES_PATH", str(FIXTURE_PROBES))

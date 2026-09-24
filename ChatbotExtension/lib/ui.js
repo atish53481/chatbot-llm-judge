@@ -3,6 +3,18 @@
 
 const ALL_METRICS = "__all__";
 const DEFAULT_THEME = "general_support";
+// Thresholds per metric live in chrome.storage.local ("thresholds": {key: value});
+// a metric with none set uses its catalog default. "thresholdEnv" names the
+// preset they came from (default / local / pr / staging / production / custom).
+const THRESHOLD_ENVS = [
+  { key: "default", label: "Default (per metric)" },
+  { key: "local", label: "Local Development" },
+  { key: "pr", label: "PR / Feature Branch" },
+  { key: "staging", label: "Staging / QA" },
+  { key: "production", label: "Production" },
+  { key: "custom", label: "Custom" },
+];
+const GROUP_PREFIX = "group:";
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -85,15 +97,110 @@ function themeOf(target) {
 }
 
 function targetLabel(target) {
-  const kinds = { mock: "sample", http: "API", dom: "web page" };
-  return `${target.name} (${kinds[target.type] || target.type})`;
+  return target.name;
 }
 
-function metricOptions(metrics) {
-  return [
-    { value: ALL_METRICS, label: "All metrics" },
-    ...metrics.map((m) => ({ value: m.key, label: m.title })),
-  ];
+// "Metric 2/7 · 3/10 · judging: What is your refund window? · 0:42" for a run in flight.
+function progressText(progress) {
+  if (!progress) return "starting…";
+  const parts = [];
+  if (progress.metricCount > 1) parts.push(`metric ${progress.metricIndex + 1}/${progress.metricCount}`);
+  if (progress.total) {
+    const doing = progress.phase === "judge" ? "judging" : "asking chatbot";
+    parts.push(`${progress.done}/${progress.total} · ${doing}: ${progress.question}`);
+  } else {
+    parts.push("starting…");
+  }
+  const seconds = Math.round((Date.now() - progress.startedAt) / 1000);
+  parts.push(`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`);
+  return parts.join(" · ");
+}
+
+// 0..1 through the current metric: each golden counts half for the chatbot, half for the judge.
+function progressFraction(progress) {
+  if (!progress || !progress.total) return 0;
+  return (progress.done + (progress.phase === "judge" ? 0.5 : 0)) / progress.total;
+}
+
+// Metrics in catalog order, grouped: [{group, label, metrics}].
+// Grouped by the dashboard categories (Quality, Retrieval, Safety, Security,
+// G-Eval, Conversational), so the side panel and the dashboard match; the
+// backend already sends the metrics in that order.
+function metricGroups(metrics) {
+  const groups = [];
+  for (const metric of metrics) {
+    let group = groups.find((g) => g.group === metric.ui_category);
+    if (!group) {
+      group = { group: metric.ui_category, label: metric.ui_category_label || metric.ui_category, metrics: [] };
+      groups.push(group);
+    }
+    group.metrics.push(metric);
+  }
+  return groups;
+}
+
+// The metric picker: "All metrics", then per group "All · <group>" and its metrics.
+function fillMetricSelect(select, metrics, selectedValue) {
+  const options = [el("option", { value: ALL_METRICS }, "All metrics")];
+  for (const group of metricGroups(metrics)) {
+    options.push(el(
+      "optgroup",
+      { label: group.label },
+      el("option", { value: GROUP_PREFIX + group.group }, `All · ${group.label}`),
+      ...group.metrics.map((m) => el("option", { value: m.key }, m.title)),
+    ));
+  }
+  select.replaceChildren(...options);
+  const values = [...select.options].map((o) => o.value);
+  select.value = values.includes(String(selectedValue)) ? selectedValue : ALL_METRICS;
+}
+
+// The metrics a picker choice stands for.
+function metricsFor(choice, metrics) {
+  if (choice === ALL_METRICS) return metrics;
+  if (choice.startsWith(GROUP_PREFIX)) return metrics.filter((m) => m.ui_category === choice.slice(GROUP_PREFIX.length));
+  return metrics.filter((m) => m.key === choice);
+}
+
+function choiceLabel(choice, metrics) {
+  if (choice === ALL_METRICS) return "all metrics";
+  if (choice.startsWith(GROUP_PREFIX)) {
+    const group = metrics.find((m) => m.ui_category === choice.slice(GROUP_PREFIX.length));
+    return group ? group.ui_category_label : choice;
+  }
+  const metric = metrics.find((m) => m.key === choice);
+  return metric ? metric.title : choice;
+}
+
+// What a metric's judge reads, in the words the dashboard uses (DeepEval field -> label).
+const FIELD_LABELS = {
+  input: "Question",
+  actual_output: "Actual result",
+  expected_output: "Expected result",
+  context: "Context (known facts)",
+  retrieval_context: "Retrieved context",
+  turns: "Conversation",
+  scenario: "Scenario",
+  expected_outcome: "Expected outcome",
+};
+
+function fieldLabel(field) {
+  return FIELD_LABELS[field] || field;
+}
+
+// "≥" for higher-is-better metrics, "≤" for violation rates (lower is better).
+function comparator(direction) {
+  return direction === "lower" ? "≤" : "≥";
+}
+
+// The catalog with each metric's threshold replaced by the user's (for charts).
+function withUserThresholds(metrics, thresholds) {
+  return metrics.map((m) => ({ ...m, threshold: thresholdFor(m, thresholds) }));
+}
+
+function thresholdFor(metric, thresholds) {
+  const value = thresholds && thresholds[metric.key];
+  return typeof value === "number" ? value : metric.threshold;
 }
 
 // The selected chatbot, the selected metric and the latest run are shared by
@@ -114,32 +221,54 @@ const settings = {
 };
 
 async function fetchTargets() {
-  const targets = await api("/api/targets");
-  if (targets.length > 0) return targets;
-  // First run: add the sample chatbot so everything works with zero setup.
-  const sample = await api("/api/targets", {
-    method: "POST",
-    body: { name: "Sample chatbot", type: "mock", config: { theme: DEFAULT_THEME } },
-  });
-  return [sample];
+  return api("/api/targets");
 }
 
-async function runMetrics(target, metricKeys, onProgress) {
+// control (optional) is how a Stop button reaches a run in flight: pass the
+// same object to stopRun(). A stopped metric comes back with status "cancelled"
+// and the metrics after it are skipped.
+async function runMetrics(target, metricKeys, onProgress, control = {}) {
   // Metrics run one after another; each is a full pass over the golden set.
   const results = [];
-  for (const key of metricKeys) {
-    onProgress(key, null);
+  const thresholds = await settings.get("thresholds", {});
+  // Cases per run: only the dashboard sets it (control.limit); none = every case.
+  const limit = control.limit || null;
+  for (const [index, key] of metricKeys.entries()) {
+    // The user's threshold for this metric; none set = the catalog default.
+    const threshold = typeof thresholds[key] === "number" ? thresholds[key] : undefined;
+    if (control.stopped) break;
+    const step = { metricIndex: index, metricCount: metricKeys.length, startedAt: Date.now() };
+    onProgress(key, null, step);
+    // A run takes one chatbot call and several judge calls per golden, so
+    // while it works, poll where it is and pass that on.
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    control.runId = runId;
+    let finished = false;
+    const poll = setInterval(async () => {
+      try {
+        const progress = await api(`/api/run/progress?run_id=${encodeURIComponent(runId)}`);
+        // A poll that answers after the run ended must not paint over the result.
+        if (progress.active && !finished) onProgress(key, null, { ...step, ...progress });
+      } catch {
+        // A missed poll only delays the next update.
+      }
+    }, 1000);
     let result;
     try {
       result = await api("/api/run", {
         method: "POST",
-        body: { target_id: target.id, metric_key: key },
+        body: { target_id: target.id, metric_key: key, threshold, run_id: runId, limit: limit || undefined },
       });
     } catch (error) {
       result = { key, status: "error", error: error.message, score: null, rows: [] };
+    } finally {
+      finished = true;
+      clearInterval(poll);
     }
     results.push(result);
     onProgress(key, result);
+    // A stopped run is partial: keep the last complete result on the charts.
+    if (result.status === "cancelled") break;
     await settings.set("lastRun", {
       targetId: target.id,
       metricKey: key,
@@ -154,15 +283,30 @@ async function runMetrics(target, metricKeys, onProgress) {
   return results;
 }
 
-async function saveCaseDetails(targetId, metricKey, result) {
-  const all = await settings.get("caseDetails", {});
-  const forTarget = all[targetId] || {};
-  forTarget[metricKey] = {
+async function stopRun(control) {
+  control.stopped = true;
+  if (control.runId) {
+    await api("/api/run/cancel", { method: "POST", body: { run_id: control.runId } });
+  }
+}
+
+// What the dashboard's Details panel shows for one metric's last run.
+function caseDetailsOf(result) {
+  return {
     finishedAt: Date.now(),
     status: result.status,
     error: result.error || null,
     rows: result.rows || [],
+    threshold: result.threshold,
+    direction: result.direction,
+    note: result.note || null,
   };
+}
+
+async function saveCaseDetails(targetId, metricKey, result) {
+  const all = await settings.get("caseDetails", {});
+  const forTarget = all[targetId] || {};
+  forTarget[metricKey] = caseDetailsOf(result);
   await settings.set("caseDetails", { ...all, [targetId]: forTarget });
 }
 

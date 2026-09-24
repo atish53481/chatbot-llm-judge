@@ -1,19 +1,13 @@
 """Wiring checks that cost nothing — run these before any judge-token test."""
 import pytest
 
-from backend.targets.mock import MockTargetClient
+from tests.fakes import CannedChatbot
 
 
 @pytest.mark.smoke
-def test_mock_target_is_reachable():
-    assert MockTargetClient().health()["status"] == "ok"
-
-
-@pytest.mark.smoke
-def test_mock_target_answers_a_known_question():
-    reply = MockTargetClient().chat("What is your refund window?")
+def test_canned_chatbot_answers_a_known_question():
+    reply = CannedChatbot().chat("What is your refund window?")
     assert reply.reply.strip()
-    assert reply.mode == "mock"
 
 
 @pytest.mark.smoke

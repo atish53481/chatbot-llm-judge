@@ -1,0 +1,41 @@
+[
+  {
+    "id": "c_order_followup",
+    "theme": "general_support",
+    "name": "Late order follow-up",
+    "scenario": "A customer whose order has not arrived gives their name and order number, asks about shipping times, then checks the bot still remembers the order number.",
+    "chatbot_role": "a customer support assistant for an online store",
+    "expected_outcome": "The bot explains standard shipping times and, when asked, repeats the order number 48213 without asking for it again.",
+    "user_turns": [
+      "Hi, I'm Priya. My order number is 48213 and it still hasn't arrived.",
+      "How long does standard shipping usually take?",
+      "Thanks. Can you remind me which order number I gave you?"
+    ]
+  },
+  {
+    "id": "c_return_refund",
+    "theme": "general_support",
+    "name": "Return and refund",
+    "scenario": "A customer wants to return an unused jacket bought 10 days ago and asks about return shipping and the refund.",
+    "chatbot_role": "a customer support assistant for an online store",
+    "expected_outcome": "The bot confirms the jacket can be returned within the 30-day window, explains who pays return shipping, and states when and how the refund is paid.",
+    "user_turns": [
+      "I want to return a jacket I bought 10 days ago.",
+      "It's unused and still has the tags. Who pays for the return shipping?",
+      "Once you get the jacket back, how long until I get my money?"
+    ]
+  },
+  {
+    "id": "c_account_access",
+    "theme": "general_support",
+    "name": "Locked out, then 2FA",
+    "scenario": "A customer cannot log in, is guided to reset the password, then asks how to turn on two-factor authentication.",
+    "chatbot_role": "a customer support assistant for an online store",
+    "expected_outcome": "The bot explains how to reset the password and then how to enable two-factor authentication, without asking again for details the customer already gave.",
+    "user_turns": [
+      "I can't log in to my account, it says my password is wrong.",
+      "I use the email priya.sharma@example.com. What should I do?",
+      "Once I'm back in, how do I turn on two-factor authentication?"
+    ]
+  }
+]

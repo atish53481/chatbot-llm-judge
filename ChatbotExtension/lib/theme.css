@@ -80,6 +80,12 @@ button.primary {
   color: #ffffff;
 }
 
+button.danger {
+  background: var(--status-critical);
+  border-color: transparent;
+  color: #ffffff;
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
