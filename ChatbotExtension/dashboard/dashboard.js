@@ -563,7 +563,7 @@ async function runKeys(keys) {
           state.chatbotHealth = unreachable ? "bad" : result.status === "error" ? state.chatbotHealth : "good";
           refreshExpandedDetail(key, result);
           if (result.status === "error") setStatus(`${title}: ${result.error}`, true);
-          else setStatus(`${title}: ${formatScore(result.score)} ${result.status} (${result.cases_run} of ${result.cases_total} cases)`);
+          else setStatus(`${title}: ${formatScore(result.score)} ${result.status} (${[`${result.cases_run} of ${result.cases_total} cases`, judgingSummary(result)].filter(Boolean).join(" · ")})`);
         }
         renderLatest();
       }
@@ -617,6 +617,19 @@ async function renderLatest() {
   }
 }
 
+// Matches runner.UNSTABLE_SPREAD: two scorings further apart flag the run.
+const UNSTABLE_SPREAD = 0.15;
+
+// Judge model and tokens for the runs made at one time (older runs have neither).
+function judgingCells(runs) {
+  const models = [...new Set(runs.map((r) => r.judge_model).filter(Boolean))];
+  const tokens = runs.map((r) => r.judge_tokens).filter((t) => typeof t === "number");
+  return [
+    el("td", {}, models.join(", ") || "–"),
+    el("td", { className: "num" }, tokens.length ? formatTokens(tokens.reduce((a, b) => a + b, 0)) : "–"),
+  ];
+}
+
 function renderTrendTable(historyByMetric, metrics) {
   const shown = metrics.filter((m) => historyByMetric[m.key].length > 0);
   const times = [...new Set(shown.flatMap((m) => historyByMetric[m.key].map((r) => r.ts)))]
@@ -624,7 +637,14 @@ function renderTrendTable(historyByMetric, metrics) {
     .reverse();
   const table = $("trend-table");
   table.tHead.replaceChildren(
-    el("tr", {}, el("th", {}, "Run time"), ...shown.map((m) => el("th", { className: "num" }, m.title))),
+    el(
+      "tr",
+      {},
+      el("th", {}, "Run time"),
+      ...shown.map((m) => el("th", { className: "num" }, m.title)),
+      el("th", {}, "Judge model"),
+      el("th", { className: "num" }, "Tokens"),
+    ),
   );
   table.tBodies[0].replaceChildren(
     ...times.map((ts) =>
@@ -634,9 +654,18 @@ function renderTrendTable(historyByMetric, metrics) {
         el("td", {}, formatRunTime(ts)),
         ...shown.map((m) => {
           const run = historyByMetric[m.key].find((r) => r.ts === ts);
-          const text = run ? `${formatScore(run.score)} ${run.passed ? "✓" : "✕"}` : "–";
-          return el("td", { className: "num" }, text);
+          if (!run) return el("td", { className: "num" }, "–");
+          const unstable = typeof run.judge_spread === "number" && run.judge_spread > UNSTABLE_SPREAD;
+          return el(
+            "td",
+            {
+              className: "num",
+              title: unstable ? `Judge unstable: two scorings differed by ${formatScore(run.judge_spread)}` : undefined,
+            },
+            `${formatScore(run.score)} ${run.passed ? "✓" : "✕"}${unstable ? " ⚠" : ""}`,
+          );
         }),
+        ...judgingCells(shown.map((m) => historyByMetric[m.key].find((r) => r.ts === ts)).filter(Boolean)),
       ),
     ),
   );

@@ -14,6 +14,16 @@ from typing import Any
 
 _LOCK = threading.RLock()
 
+RUN_EXTRA_COLUMNS = (
+    ("cases_run", "INTEGER"),
+    ("judge_model", "TEXT"),
+    ("judge_tokens", "INTEGER"),
+    ("judge_calls", "INTEGER"),
+    ("target_calls", "INTEGER"),
+    ("duration_s", "REAL"),
+    ("judge_spread", "REAL"),
+)
+
 
 def init_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
@@ -42,9 +52,13 @@ def init_db(path: str) -> sqlite3.Connection:
             )
             """
         )
-        # Databases from before cases-per-run have no cases_run column.
-        if "cases_run" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
-            conn.execute("ALTER TABLE runs ADD COLUMN cases_run INTEGER")
+        # Older databases lack the later columns: cases per run, and how each run
+        # was judged (judge model, its tokens and calls, chatbot calls, duration,
+        # and the widest gap between two scorings of one case).
+        run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        for column, kind in RUN_EXTRA_COLUMNS:
+            if column not in run_columns:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {kind}")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_target_metric ON runs (target_id, metric_key)"
         )
@@ -195,12 +209,20 @@ def record_run(
     passed: bool,
     ts: str,
     cases_run: int | None = None,
+    judge_model: str | None = None,
+    judge_tokens: int | None = None,
+    judge_calls: int | None = None,
+    target_calls: int | None = None,
+    duration_s: float | None = None,
+    judge_spread: float | None = None,
 ) -> int:
     with _LOCK:
         cur = conn.execute(
-            "INSERT INTO runs (target_id, metric_key, score, passed, ts, cases_run)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (target_id, metric_key, score, int(passed), ts, cases_run),
+            "INSERT INTO runs (target_id, metric_key, score, passed, ts, cases_run, judge_model,"
+            " judge_tokens, judge_calls, target_calls, duration_s, judge_spread)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (target_id, metric_key, score, int(passed), ts, cases_run, judge_model,
+             judge_tokens, judge_calls, target_calls, duration_s, judge_spread),
         )
         conn.commit()
         return cur.lastrowid

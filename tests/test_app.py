@@ -796,3 +796,19 @@ def test_target_keeps_its_limits_and_rejects_bad_ones(client):
     r = client.post("/api/targets", json={"name": "x", "type": "http",
                                           "config": {**BOT_CONFIG, "max_message_length": -5}})
     assert r.status_code == 400 and "max_message_length" in r.text
+
+
+def test_run_can_check_judge_consistency_and_reports_how_it_was_judged(client, app_module):
+    target = _create_target(client)
+    with patch.object(app_module, "build_judge", return_value=object()), \
+         patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": _fake_spec([])}), \
+         patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY):
+        r = client.post("/api/run", json={"target_id": target["id"], "metric_key": "answer_relevancy",
+                                          "check_consistency": True})
+    body = r.json()
+    assert r.status_code == 200, r.text
+    assert body["judge_spread"] == 0 and body["judge_unstable"] is False
+    assert set(body["judge"]) == {"model", "tokens", "calls"}
+    history = client.get("/api/history", params={
+        "target_id": target["id"], "metric_key": "answer_relevancy"}).json()
+    assert history[0]["judge_spread"] == 0 and "duration_s" in history[0]

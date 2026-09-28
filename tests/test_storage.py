@@ -111,3 +111,28 @@ def test_runs_record_cases_run_and_legacy_dbs_gain_the_column(tmp_path):
     storage.record_run(conn, 1, "m", 0.9, True, "t2", cases_run=3)
     rows = storage.history(conn, 1, "m")
     assert [r["cases_run"] for r in rows] == [None, 3]
+
+
+def test_runs_record_how_they_were_judged(tmp_path):
+    conn = storage.init_db(str(tmp_path / "t.db"))
+    target_id = storage.add_target(conn, "bot", "http", {})
+    storage.record_run(conn, target_id, "m", 0.8, True, "2026-01-01T00:00:00Z", cases_run=3,
+                       judge_model="llama-x", judge_tokens=1200, judge_calls=6, target_calls=3,
+                       duration_s=12.5, judge_spread=0.05)
+    row = storage.history(conn, target_id, "m")[0]
+    assert (row["judge_model"], row["judge_tokens"], row["judge_calls"], row["target_calls"],
+            row["duration_s"], row["judge_spread"]) == ("llama-x", 1200, 6, 3, 12.5, 0.05)
+
+
+def test_old_runs_table_gets_the_judging_columns(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, target_id INTEGER NOT NULL,"
+                " metric_key TEXT NOT NULL, score REAL, passed INTEGER NOT NULL, ts TEXT NOT NULL)")
+    old.execute("INSERT INTO runs (target_id, metric_key, score, passed, ts) VALUES (1, 'm', 0.5, 0, 't')")
+    old.commit()
+    old.close()
+    conn = storage.init_db(path)
+    row = storage.history(conn, 1, "m")[0]
+    assert row["score"] == 0.5 and row["judge_model"] is None and row["judge_spread"] is None

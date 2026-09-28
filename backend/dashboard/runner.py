@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import datetime as _dt
 import sqlite3
+import time
 
-from backend import storage
+from backend import storage, usage
 from backend.metrics_catalog import DEFAULT_THEME
 from backend.targets.http_client import MessageTooLong
 
@@ -98,12 +99,17 @@ def run_spec(
     persona: str = "",
     limit: int | None = None,
     probe_set: str = "",
+    check_consistency: bool = False,
 ) -> dict:
     """on_progress(done, total, phase, question) is called as the sweep moves:
     phase "chat" while the chatbot answers, "judge" while the judge scores.
     If it raises RunCancelled the sweep stops, and nothing is recorded.
     persona and probe_set go to spec.cases (security probes: the bot's role in
-    the context, and which probe set to send); limit caps how many cases are sent."""
+    the context, and which probe set to send); limit caps how many cases are sent.
+    check_consistency has the judge score every reply twice (the chatbot is
+    asked once): each case scores the average, and the run reports the widest
+    gap between the two scorings, flagged when it passes UNSTABLE_SPREAD."""
+    usage_before, started = usage.snapshot(), time.monotonic()
     report = on_progress or (lambda *_args: None)
     kind = getattr(spec, "kind", "single")
     try:
@@ -123,7 +129,7 @@ def run_spec(
 
     pass_mark = _threshold(spec, threshold)
     prompt = getattr(spec, "prompt", None)
-    rows, scored, skipped = [], [], 0
+    rows, scored, skipped, spreads = [], [], 0, []
     try:
         metric = spec.build_metric(judge, _deepeval_threshold(spec, pass_mark))
         for done, item in enumerate(items):
@@ -150,6 +156,17 @@ def run_spec(
             scored.append(item)
             report(done, len(items), "judge", question)
             metric.measure(case)
+            score, passed_case, reason = _reported(spec, metric.score), bool(metric.is_successful()), metric.reason or ""
+            row_scores = None
+            if check_consistency:
+                metric.measure(case)
+                row_scores = [score, _reported(spec, metric.score)]
+                both = [s for s in row_scores if s is not None]
+                if both:
+                    score = sum(both) / len(both)
+                    passed_case = _meets(spec, score, pass_mark)
+                if None not in row_scores:
+                    spreads.append(abs(row_scores[0] - row_scores[1]))
             rows.append({
                 "question": question,
                 "input": sent,
@@ -157,9 +174,10 @@ def run_spec(
                 "expected_output": expected,
                 "context": used,
                 "context_source": source,
-                "score": _reported(spec, metric.score),
-                "passed": bool(metric.is_successful()),
-                "reason": metric.reason or "",
+                "score": score,
+                "passed": passed_case,
+                "reason": reason,
+                **({"scores": row_scores} if row_scores is not None else {}),
             })
     except RunCancelled:
         # A partial sweep would skew the trend, so a stopped run is not recorded.
@@ -185,9 +203,29 @@ def run_spec(
     avg = sum(scores) / len(scores) if scores else None
     # The run is judged on its average, like a quality gate; each case keeps its own verdict.
     passed = _meets(spec, avg, pass_mark)
+    # How this run was judged: counted as the change in the usage counters
+    # (runs go one at a time, so nothing else moves them meanwhile).
+    usage_after = usage.snapshot()
+    judge_model = _judge_name(judge)
+    judge_tokens = usage_after["judge_tokens"] - usage_before["judge_tokens"]
+    judge_calls = usage_after["judge_calls"] - usage_before["judge_calls"]
+    chatbot_calls = usage_after["target_calls"] - usage_before["target_calls"]
+    duration = round(time.monotonic() - started, 2)
+    spread = max(spreads) if spreads else None
+    previous = storage.history(conn, target_id, spec.key)
+    previous_model = previous[-1].get("judge_model") if previous else None
     # One row per run: the charts plot run averages, not individual cases.
-    storage.record_run(conn, target_id, spec.key, avg, passed, _now_iso(), cases_run=len(rows))
+    storage.record_run(
+        conn, target_id, spec.key, avg, passed, _now_iso(), cases_run=len(rows),
+        judge_model=judge_model, judge_tokens=judge_tokens, judge_calls=judge_calls,
+        target_calls=chatbot_calls, duration_s=duration, judge_spread=spread,
+    )
     return {
+        "judge": {"model": judge_model, "tokens": judge_tokens, "calls": judge_calls},
+        "chatbot_calls": chatbot_calls,
+        "duration_s": duration,
+        "judge_spread": spread,
+        "judge_unstable": spread is not None and spread > UNSTABLE_SPREAD,
         "key": spec.key,
         "theme": theme,
         "status": "pass" if passed else "fail",
@@ -204,8 +242,27 @@ def run_spec(
             _case_note(spec, scored),
             f"Skipped {skipped} of {len(items)} cases longer than this chatbot's max message "
             f"length ({max_len} characters)." if skipped else None,
+            f"Judge model changed from {previous_model} to {judge_model}: scores may not be "
+            "comparable with earlier runs."
+            if previous_model and judge_model and previous_model != judge_model else None,
+            f"Judge unstable: two scorings of one case differed by {spread:.2f} (over "
+            f"{UNSTABLE_SPREAD}), so treat this score with care."
+            if spread is not None and spread > UNSTABLE_SPREAD else None,
         ),
     }
+
+
+# Two scorings of one reply further apart than this flag the run as unstable.
+UNSTABLE_SPREAD = 0.15
+
+
+def _judge_name(judge) -> str | None:
+    """The judge model's name (DeepEval models expose get_model_name)."""
+    try:
+        name = judge.get_model_name()
+    except Exception:  # noqa: BLE001 - a judge without a name is still a judge
+        return None
+    return str(name) if name else None
 
 
 def _join_notes(*notes: str | None) -> str | None:

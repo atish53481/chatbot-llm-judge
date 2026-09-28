@@ -393,3 +393,67 @@ def test_summarization_source_is_cut_to_the_chatbots_limit(tmp_path):
     assert len(spec.prompt(item)) <= 300
     assert spec.build_case(item, "r").input in spec.prompt(item)
     assert spec.case_note(item)
+
+
+# --- Stage 2: how each run was judged ----------------------------------------
+
+def _judge(name="judge-a"):
+    return SimpleNamespace(get_model_name=lambda: name)
+
+
+def test_run_records_judge_model_usage_and_duration(tmp_path, monkeypatch):
+    from backend import usage
+    usage.reset()
+    conn, target_id = _db(tmp_path)
+    metric = _fake_metric([0.9], [True])
+    # The judge's completions report their tokens through the usage counter.
+    metric.measure.side_effect = lambda case: (
+        usage.record_judge({"prompt_tokens": 100, "completion_tokens": 20}),
+        setattr(metric, "score", 0.9), setattr(metric, "reason", "ok"))
+    metric.is_successful.side_effect = lambda: True
+    spec = _fake_spec([_case("What is your refund window?")], metric)
+    result = run_spec(spec, judge=_judge(), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert result["judge"] == {"model": "judge-a", "tokens": 120, "calls": 1}
+    assert result["chatbot_calls"] == 0  # the canned bot makes no HTTP calls
+    assert result["duration_s"] >= 0
+    row = storage.history(conn, target_id, "fake_metric")[0]
+    assert (row["judge_model"], row["judge_tokens"], row["judge_calls"]) == ("judge-a", 120, 1)
+
+
+def test_changed_judge_model_is_noted(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("q")], _fake_metric([0.9], [True]))
+    run_spec(spec, judge=_judge("judge-a"), target=CannedChatbot(), target_id=target_id, conn=conn)
+    spec.build_metric = lambda judge, threshold=0.7: _fake_metric([0.9], [True])
+    result = run_spec(spec, judge=_judge("judge-b"), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert "Judge model changed from judge-a to judge-b" in result["note"]
+    spec.build_metric = lambda judge, threshold=0.7: _fake_metric([0.9], [True])
+    same = run_spec(spec, judge=_judge("judge-b"), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert same["note"] is None
+
+
+def test_consistency_check_scores_twice_and_flags_a_wide_gap(tmp_path):
+    conn, target_id = _db(tmp_path)
+    target = MagicMock()
+    target.chat.return_value = SimpleNamespace(reply="r", retrieval_context=None)
+    # Case 1 scores 0.9 then 0.8 (gap 0.1); case 2 scores 0.9 then 0.5 (gap 0.4).
+    metric = _fake_metric([0.9, 0.8, 0.9, 0.5], [True, True, True, False])
+    spec = _fake_spec([_case("q1"), _case("q2")], metric)
+    result = run_spec(spec, judge=_judge(), target=target, target_id=target_id, conn=conn,
+                      check_consistency=True)
+    assert target.chat.call_count == 2  # the chatbot is asked once per case
+    assert metric.measure.call_count == 4
+    assert [r["score"] for r in result["rows"]] == pytest.approx([0.85, 0.7])
+    assert [r["scores"] for r in result["rows"]] == [[0.9, 0.8], [0.9, 0.5]]
+    assert result["score"] == pytest.approx(0.775)
+    assert result["judge_spread"] == pytest.approx(0.4) and result["judge_unstable"] is True
+    assert storage.history(conn, target_id, "fake_metric")[0]["judge_spread"] == pytest.approx(0.4)
+
+
+def test_without_the_check_nothing_is_scored_twice(tmp_path):
+    conn, target_id = _db(tmp_path)
+    metric = _fake_metric([0.9], [True])
+    spec = _fake_spec([_case("q")], metric)
+    result = run_spec(spec, judge=_judge(), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert metric.measure.call_count == 1
+    assert result["judge_spread"] is None and result["judge_unstable"] is False

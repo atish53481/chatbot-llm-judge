@@ -75,6 +75,19 @@ function formatScore(score) {
   return typeof score === "number" ? score.toFixed(2) : "n/a";
 }
 
+function formatTokens(tokens) {
+  if (typeof tokens !== "number") return "";
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
+}
+
+// "14.2k tokens · ⚠ judge unstable (0.40)": how a finished run was judged.
+function judgingSummary(result) {
+  const parts = [];
+  if (result.judge && typeof result.judge.tokens === "number") parts.push(`${formatTokens(result.judge.tokens)} tokens`);
+  if (result.judge_unstable) parts.push(`⚠ judge unstable (${formatScore(result.judge_spread)})`);
+  return parts.join(" · ");
+}
+
 function formatRunTime(ts) {
   // Backend timestamps are ISO-8601 UTC, e.g. "2026-09-16T14:32:07Z".
   const date = new Date(ts);
@@ -231,6 +244,8 @@ async function runMetrics(target, metricKeys, onProgress, control = {}) {
   // Metrics run one after another; each is a full pass over the golden set.
   const results = [];
   const thresholds = await settings.get("thresholds", {});
+  // Set in the side panel; both views honour it.
+  const checkConsistency = await settings.get("checkConsistency", false);
   // Cases per run: only the dashboard sets it (control.limit); none = every case.
   const limit = control.limit || null;
   for (const [index, key] of metricKeys.entries()) {
@@ -257,7 +272,10 @@ async function runMetrics(target, metricKeys, onProgress, control = {}) {
     try {
       result = await api("/api/run", {
         method: "POST",
-        body: { target_id: target.id, metric_key: key, threshold, run_id: runId, limit: limit || undefined },
+        body: {
+          target_id: target.id, metric_key: key, threshold, run_id: runId, limit: limit || undefined,
+          check_consistency: checkConsistency,
+        },
       });
     } catch (error) {
       result = { key, status: "error", error: error.message, score: null, rows: [] };

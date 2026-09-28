@@ -125,6 +125,19 @@ record scores that mean nothing:
 - **Plain errors.** An HTTP 401/403 says the session or cookie has probably expired
   (paste a fresh cURL); timeouts and unreachable hosts say so.
 
+## How far to trust a score
+
+Every run records how it was judged: the judge model, its tokens and calls, the
+chatbot calls and the duration. The side panel's result line and the dashboard's
+status line show the tokens, and the trend table has *Judge model* and *Tokens*
+columns. When a metric's judge model differs from its previous run on that chatbot,
+the result's note warns that the scores may not be comparable.
+
+Tick **Check judge consistency** in the side panel to have the judge score every
+reply twice (the chatbot is asked once, the judge costs about twice as much). Each
+case scores the average of the two; a run whose two scorings of one case differ by
+more than 0.15 is flagged ⚠ *judge unstable*, in the result and in the trend table.
+
 ## Golden answers
 
 Each chatbot is judged against one golden set (theme). `generic`, the default, fits

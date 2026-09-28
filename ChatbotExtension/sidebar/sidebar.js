@@ -710,7 +710,7 @@ function renderRunRow(line, title, result, progress) {
     el(
       "span",
       { className: "run-row-chip" },
-      `${formatScore(result.score)} ${comparator(result.direction)} ${formatScore(result.threshold)} ${result.status === "pass" ? "✓" : "✕"} (${result.cases_run} cases)`,
+      `${formatScore(result.score)} ${comparator(result.direction)} ${formatScore(result.threshold)} ${result.status === "pass" ? "✓" : "✕"} (${[`${result.cases_run} cases`, judgingSummary(result)].filter(Boolean).join(" · ")})`,
     ),
   );
 }
@@ -768,6 +768,9 @@ $("target-select").addEventListener("change", () => {
     $("status").textContent = error.message;
   });
 });
+$("check-consistency").addEventListener("change", () =>
+  settings.set("checkConsistency", $("check-consistency").checked));
+
 // --- Metrics to run: a tick and a threshold per metric ------------------------
 async function setChecked(keys) {
   await settings.set("checkedMetrics", [...keys]);
@@ -777,6 +780,7 @@ async function renderThresholds() {
   const env = await settings.get("thresholdEnv", "default");
   const thresholds = await settings.get("thresholds", {});
   const saved = await settings.get("checkedMetrics", null);
+  $("check-consistency").checked = await settings.get("checkConsistency", false);
   const known = new Set(state.metrics.map((m) => m.key));
   // Metrics with no cases for this chatbot are listed as skipped, not sent.
   const empty = new Set(state.metrics.filter(hasNoCases).map((m) => m.key));

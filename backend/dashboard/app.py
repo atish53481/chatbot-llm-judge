@@ -120,6 +120,8 @@ class RunRequest(BaseModel):
     run_id: str | None = Field(default=None, max_length=64)
     # Cases per run from the dashboard; None = every case in the dataset.
     limit: int | None = Field(default=None, ge=1)
+    # Score every reply twice to measure how steady the judge is (~2x judge tokens).
+    check_consistency: bool = False
 
 
 class RunCancel(BaseModel):
@@ -680,7 +682,7 @@ def api_run(req: RunRequest):
         return run_spec(
             spec, judge, target, req.target_id, _conn, theme=theme, threshold=req.threshold,
             on_progress=on_progress, persona=row["config"].get("persona", ""), limit=req.limit,
-            probe_set=row["config"].get("probe_set", ""),
+            probe_set=row["config"].get("probe_set", ""), check_consistency=req.check_consistency,
         )
     finally:
         if req.run_id:
