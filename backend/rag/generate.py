@@ -11,7 +11,9 @@ from backend.datasets import goldens as goldens_store
 from backend.rag.embeddings import LocalSentenceEmbedder
 
 
-def generate_goldens_from_document(path: str, theme: str, filename: str, judge) -> int:
+def generate_goldens_from_document(
+    path: str, theme: str, filename: str, judge, document_id: int | None = None
+) -> int:
     """Runs the Synthesizer on one document and saves what it produces as
     goldens under theme, tagged with their source document. Returns the
     count of goldens created. Raises on any Synthesizer/parsing failure —
@@ -37,5 +39,6 @@ def generate_goldens_from_document(path: str, theme: str, filename: str, judge) 
             categories=[],
             source="synthesized",
             source_document=filename,
+            source_document_id=document_id,
         )
     return len(generated)

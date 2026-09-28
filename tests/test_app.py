@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -785,6 +786,191 @@ def test_document_from_url_reports_unusable_pages(app_module, client, monkeypatc
 def test_document_from_url_rejects_unsafe_theme(client):
     r = client.post("/api/documents/url", json={"theme": "../evil", "url": "https://help.example"})
     assert r.status_code == 422
+
+
+def test_upload_saves_names_the_synthesizer_can_use(app_module, client, monkeypatch, tmp_path):
+    # DeepEval names a Chroma collection after the file; spaces or brackets made it fail silently.
+    import re
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    with patch.object(app_module, "generate_goldens_from_document", return_value=2) as mock_gen:
+        r = client.post("/api/documents", data={"theme": "general_support"},
+                        files={"file": ("new 21 (PRD) v2.txt", b"Refunds within 7 days.", "text/plain")})
+    assert r.status_code == 200, r.text
+    assert r.json()["filename"] == "new 21 (PRD) v2.txt"
+    saved = Path(mock_gen.call_args.args[0])
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]", saved.stem), saved.name
+    assert saved.suffix == ".txt" and saved.read_bytes() == b"Refunds within 7 days."
+
+
+def test_upload_that_yields_no_goldens_is_reported_as_an_error(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    with patch.object(app_module, "generate_goldens_from_document", return_value=0):
+        r = client.post("/api/documents", data={"theme": "general_support"},
+                        files={"file": ("notes.txt", b"hi", "text/plain")})
+    body = r.json()
+    assert body["status"] == "error" and body["goldens_created"] == 0
+    assert "no golden answers" in body["error"]
+
+
+@pytest.fixture(autouse=True)
+def documents_in_the_foreground(app_module, monkeypatch):
+    """Generation normally runs on a background thread and enhances the text with
+    the judge first; tests run the job inline and skip the LLM rewrite unless
+    they say otherwise."""
+    monkeypatch.setattr(app_module, "_start_job", lambda job: job())
+    monkeypatch.setattr(app_module, "enhance_document", lambda path, judge: path)
+
+
+def test_upload_returns_at_once_and_the_job_reports_progress(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    jobs = []
+    monkeypatch.setattr(app_module, "_start_job", jobs.append)
+    with patch.object(app_module, "generate_goldens_from_document", return_value=5):
+        r = client.post("/api/documents", data={"theme": "general_support"},
+                        files={"file": ("faq.txt", b"Refunds within 7 days.", "text/plain")})
+        assert r.status_code == 200 and r.json()["status"] == "queued"
+        doc_id = r.json()["id"]
+        jobs[0]()
+    doc = client.get(f"/api/documents/{doc_id}").json()
+    assert (doc["status"], doc["goldens_created"]) == ("ready", 5)
+
+
+def test_upload_enhances_the_text_before_generating(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    seen = {}
+
+    def fake_enhance(path, judge):
+        seen["status"] = app_module.storage.list_documents(app_module._conn)[0]["status"]
+        out = path.with_name(f"{path.stem}_enhanced.txt")
+        out.write_text("# Refunds\nRefunds are paid within 7 days.", encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(app_module, "enhance_document", fake_enhance)
+    with patch.object(app_module, "generate_goldens_from_document", return_value=3) as mock_gen:
+        r = client.post("/api/documents", data={"theme": "general_support"},
+                        files={"file": ("faq.json", b'[{"q": 1}]', "text/plain")})
+    assert r.status_code == 400  # .json is not a supported upload type
+    with patch.object(app_module, "generate_goldens_from_document", return_value=3) as mock_gen:
+        r = client.post("/api/documents", data={"theme": "general_support"},
+                        files={"file": ("faq.txt", b'[{"q": 1}]', "text/plain")})
+    doc = r.json()
+    assert seen["status"] == "enhancing"
+    assert Path(mock_gen.call_args.args[0]).name.endswith("_enhanced.txt")
+    assert doc["status"] == "ready" and doc["enhanced_path"].endswith("_enhanced.txt")
+    text = client.get(f"/api/documents/{doc['id']}/enhanced").json()["text"]
+    assert text.startswith("# Refunds")
+
+
+def test_upload_can_skip_the_ai_enhancement(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    called = []
+    monkeypatch.setattr(app_module, "enhance_document", lambda path, judge: called.append(path) or path)
+    with patch.object(app_module, "generate_goldens_from_document", return_value=1) as mock_gen:
+        r = client.post("/api/documents", data={"theme": "general_support", "enhance": "false"},
+                        files={"file": ("faq.txt", b"Refunds within 7 days.", "text/plain")})
+    assert called == [] and not Path(mock_gen.call_args.args[0]).name.endswith("_enhanced.txt")
+    assert r.json()["enhanced_path"] is None
+    assert client.get(f"/api/documents/{r.json()['id']}/enhanced").status_code == 404
+
+
+def test_a_failed_enhancement_is_reported(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+
+    def broken(path, judge):
+        raise ValueError("faq.txt has no text to work with")
+
+    monkeypatch.setattr(app_module, "enhance_document", broken)
+    with patch.object(app_module, "generate_goldens_from_document", return_value=1) as mock_gen:
+        r = client.post("/api/documents", data={"theme": "general_support"},
+                        files={"file": ("faq.txt", b" ", "text/plain")})
+    doc = r.json()
+    assert doc["status"] == "error" and "enhancing failed" in doc["error"] and "no text" in doc["error"]
+    mock_gen.assert_not_called()
+
+
+def test_url_documents_are_enhanced_too(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    monkeypatch.setattr(app_module, "fetch_page_text", lambda url: ("Card help text.", url))
+    enhanced = []
+    monkeypatch.setattr(app_module, "enhance_document", lambda path, judge: enhanced.append(path) or path)
+    with patch.object(app_module, "generate_goldens_from_document", return_value=2):
+        r = client.post("/api/documents/url", json={"theme": "bank", "url": "https://help.example/card"})
+    assert r.json()["status"] == "ready" and len(enhanced) == 1
+
+
+def test_unknown_document_is_404(client):
+    assert client.get("/api/documents/999999").status_code == 404
+    assert client.get("/api/documents/999999/enhanced").status_code == 404
+    assert client.post("/api/documents/999999/regenerate", json={}).status_code == 404
+
+
+def _fake_generator(counts):
+    """Stands in for DeepEval's Synthesizer: writes counts.pop(0) goldens per call."""
+    def generate(path, theme, filename, judge, document_id=None):
+        count = counts.pop(0)
+        for n in range(count):
+            goldens_store.add_golden(
+                theme=theme, question=f"Q{n}", expected_answer=f"A{n}", context=[], categories=[],
+                source="synthesized", source_document=filename, source_document_id=document_id,
+            )
+        return count
+    return generate
+
+
+def test_goldens_from_an_upload_survive_a_panel_reload(app_module, client, monkeypatch, tmp_path):
+    # The panel resets goldens on every load. The document row outlives the load,
+    # so the goldens it generated must too, or the panel would list a document
+    # claiming "4 golden answers added" next to a golden set without them.
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    Path(goldens_store.GOLDENS_PATH).write_text("[]", encoding="utf-8")
+    defaults = tmp_path / "goldens.default.json"
+    defaults.write_text(json.dumps([
+        {"id": "g_0001", "theme": "general_support", "question": "Shipped?",
+         "expected_answer": "Yes.", "context": [], "categories": []},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(goldens_store, "DEFAULT_GOLDENS_PATH", str(defaults))
+    monkeypatch.setattr(app_module, "generate_goldens_from_document", _fake_generator([4]))
+
+    client.post("/api/documents", data={"theme": "general_support"},
+                files={"file": ("new 21.txt", b"Refunds within 7 days.", "text/plain")})
+    assert len(client.get("/api/goldens", params={"theme": "general_support"}).json()) == 4
+
+    client.post("/api/goldens/reset", json={})
+
+    after = client.get("/api/goldens", params={"theme": "general_support"}).json()
+    assert [g["question"] for g in after] == ["Shipped?", "Q0", "Q1", "Q2", "Q3"]
+
+
+def test_regenerating_a_document_replaces_its_goldens(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    Path(goldens_store.GOLDENS_PATH).write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(app_module, "generate_goldens_from_document", _fake_generator([4, 2]))
+
+    upload = client.post("/api/documents", data={"theme": "general_support"},
+                         files={"file": ("faq.txt", b"Refunds within 7 days.", "text/plain")})
+    document_id = upload.json()["id"]
+    assert upload.json()["goldens_created"] == 4
+
+    r = client.post(f"/api/documents/{document_id}/regenerate", json={})
+    assert r.json()["status"] == "ready" and r.json()["goldens_created"] == 2
+
+    goldens = client.get("/api/goldens", params={"theme": "general_support"}).json()
+    assert len(goldens) == 2, goldens  # replaced, not four plus two
+    assert all(g["source_document_id"] == document_id for g in goldens)
+
+
+def test_reuploading_the_same_file_replaces_its_goldens(app_module, client, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "DOCUMENTS_DIR", tmp_path)
+    Path(goldens_store.GOLDENS_PATH).write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(app_module, "generate_goldens_from_document", _fake_generator([3, 3]))
+
+    for _ in range(2):
+        r = client.post("/api/documents", data={"theme": "general_support"},
+                        files={"file": ("faq.txt", b"Refunds within 7 days.", "text/plain")})
+        assert r.json()["status"] == "ready"
+
+    goldens = client.get("/api/goldens", params={"theme": "general_support"}).json()
+    assert len(goldens) == 3, goldens  # the second upload replaced the first
 
 
 def test_target_keeps_its_limits_and_rejects_bad_ones(client):

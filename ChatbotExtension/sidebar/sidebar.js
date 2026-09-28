@@ -172,13 +172,46 @@ function startEditGolden(golden, row) {
   $("golden-question").focus();
 }
 
+// Generation runs in the background on the backend (minutes of judge calls):
+// the document list polls while any document is still in one of these states.
+const DOCUMENT_WORKING = {
+  queued: "queued…",
+  enhancing: "AI is cleaning up the text…",
+  generating: "DeepEval is generating golden answers…",
+};
+const DOCUMENT_POLL_MS = 4000;
+let documentPollTimer = null;
+let documentsInFlight = new Set();
+let documentsOutcome = null;
+
 function documentRow(doc) {
   const icon = doc.status === "ready" ? "✓" : doc.status === "error" ? "!" : "…";
+  let detail = null;
+  if (doc.status === "error") detail = el("span", { className: "status-error small" }, doc.error);
+  else if (doc.status === "ready") detail = el("span", { className: "status-pass small" }, `${doc.goldens_created ?? 0} golden answers added`);
+  else if (DOCUMENT_WORKING[doc.status]) detail = el("span", { className: "small" }, DOCUMENT_WORKING[doc.status]);
   return el(
     "li",
     { className: `document-row status-${doc.status}` },
     el("span", {}, `${icon} ${doc.filename}`),
-    doc.status === "error" ? el("span", { className: "status-error small" }, doc.error) : null,
+    detail,
+    // Rerun generation without re-uploading: the set replaces this document's
+    // previous one, so the golden dataset can change as the document does.
+    doc.status in DOCUMENT_WORKING ? null : el("button", {
+      type: "button",
+      "aria-label": `Regenerate golden answers from: ${doc.filename}`,
+      title: "Rerun generation for this document, replacing its golden answers",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+          await api(`/api/documents/${doc.id}/regenerate`, { method: "POST", body: { enhance: true } });
+        } catch (error) {
+          $("document-form-error").textContent = error.message;
+        }
+        await loadDocuments();
+      },
+    }, "Regenerate"),
     confirmButton("Delete", `Delete document: ${doc.filename}`, async () => {
       await api(`/api/documents/${doc.id}`, { method: "DELETE" });
       await loadDocuments();
@@ -187,14 +220,35 @@ function documentRow(doc) {
 }
 
 async function loadDocuments() {
+  clearTimeout(documentPollTimer);
+  documentPollTimer = null;
   const target = currentTarget();
   const list = $("document-list");
   if (!target) {
     list.replaceChildren();
+    documentsInFlight = new Set();
+    documentsOutcome = null;
     return;
   }
-  const docs = await api(`/api/documents?theme=${encodeURIComponent(themeOf(target))}`);
+  let docs;
+  try {
+    docs = await api(`/api/documents?theme=${encodeURIComponent(themeOf(target))}`);
+  } catch {
+    // Backend briefly unreachable: keep the list and try again.
+    documentPollTimer = setTimeout(loadDocuments, DOCUMENT_POLL_MS);
+    return;
+  }
   list.replaceChildren(...docs.map(documentRow));
+  const working = new Set(docs.filter((d) => d.status in DOCUMENT_WORKING).map((d) => d.id));
+  // Reload the golden list whenever a document's outcome changes, not only when
+  // this poll caught it mid-generation: a fast run can finish between polls.
+  const outcome = docs.map((d) => `${d.id}:${d.status}:${d.goldens_created ?? 0}`).join("|");
+  const changed = documentsOutcome !== null && outcome !== documentsOutcome;
+  documentsOutcome = outcome;
+  const finished = [...documentsInFlight].some((id) => !working.has(id));
+  documentsInFlight = working;
+  if (finished || changed) await loadGoldens();
+  if (working.size) documentPollTimer = setTimeout(loadDocuments, DOCUMENT_POLL_MS);
 }
 
 // Shipped golden sets can lose rows (a delete in this panel lasts until the next
@@ -477,17 +531,13 @@ $("document-form").addEventListener("submit", async (event) => {
   formData.append("theme", themeOf(target));
   formData.append("file", file);
   $("document-submit").disabled = true;
-  $("document-submit").textContent = "Generating… (real LLM calls, can take a while)";
+  $("document-submit").textContent = "Uploading…";
   try {
+    // Returns at once with status "queued"; loadDocuments polls until it is done.
     const response = await fetch(`${BACKEND_URL}/api/documents`, { method: "POST", body: formData });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "Upload failed.");
-    if (result.status === "error") {
-      $("document-form-error").textContent = result.error;
-    } else {
-      fileInput.value = "";
-      await loadGoldens();
-    }
+    fileInput.value = "";
     await loadDocuments();
   } catch (error) {
     $("document-form-error").textContent = error.message;
@@ -505,15 +555,11 @@ $("url-form").addEventListener("submit", async (event) => {
   const url = $("document-url").value.trim();
   if (!url) return;
   $("url-submit").disabled = true;
-  $("url-submit").textContent = "Fetching and generating… (real LLM calls, can take a while)";
+  $("url-submit").textContent = "Fetching page…";
   try {
-    const result = await api("/api/documents/url", { method: "POST", body: { theme: themeOf(target), url } });
-    if (result.status === "error") {
-      $("url-form-error").textContent = result.error;
-    } else {
-      $("document-url").value = "";
-      await loadGoldens();
-    }
+    // The page is fetched in the request; generation then runs in the background.
+    await api("/api/documents/url", { method: "POST", body: { theme: themeOf(target), url } });
+    $("document-url").value = "";
     await loadDocuments();
   } catch (error) {
     $("url-form-error").textContent = error.message;
@@ -687,6 +733,14 @@ armConfirm($("reset-target-runs"), async () => {
   }
 });
 
+function renderSkippedRow(line, title, theme) {
+  line.className = "run-row skipped";
+  line.replaceChildren(
+    el("span", { className: "run-row-title" }, title),
+    el("span", { className: "run-row-chip muted" }, `skipped: no cases in '${theme}'`),
+  );
+}
+
 // One score-bar row per metric: bar fill mirrors the dashboard's chart bars,
 // a chip on the right gives the pass/fail read at a glance.
 function renderRunRow(line, title, result, progress) {
@@ -730,14 +784,6 @@ function renderRunRow(line, title, result, progress) {
       { className: "run-row-chip" },
       `${formatScore(result.score)} ${comparator(result.direction)} ${formatScore(result.threshold)} ${result.status === "pass" ? "✓" : "✕"} (${[`${result.cases_run} cases`, judgingSummary(result)].filter(Boolean).join(" · ")})`,
     ),
-  );
-}
-
-function renderSkippedRow(line, title, theme) {
-  line.className = "run-row skipped";
-  line.replaceChildren(
-    el("span", { className: "run-row-title" }, title),
-    el("span", { className: "run-row-chip muted" }, `skipped: no cases in '${theme}'`),
   );
 }
 

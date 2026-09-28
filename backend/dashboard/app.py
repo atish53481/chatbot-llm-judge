@@ -23,6 +23,7 @@ from backend.judges.judge import build_judge, judge_config
 from backend.metrics_catalog import (
     ALL_SPECS, DEFAULT_THEME, ENVIRONMENTS, GROUPS, SPECS_BY_KEY, UI_CATEGORIES, UI_CATEGORY_LABELS,
 )
+from backend.rag.enhance import enhance_document
 from backend.rag.fetch import fetch_page_text
 from backend.targets.base import ChatbotClient
 from backend.targets.curl import (
@@ -376,7 +377,11 @@ def api_clear_target_runs(target_id: int):
 
 
 @app.post("/api/documents")
-def api_upload_document(theme: str = Form(...), file: UploadFile = File(...)):
+def api_upload_document(
+    theme: str = Form(...), file: UploadFile = File(...), enhance: bool = Form(True)
+):
+    """Saves the upload and starts golden generation in the background: the
+    response is the document row (status "queued"); poll GET /api/documents/{id}."""
     try:
         judge = build_judge(**_judge_overrides())
     except RuntimeError as e:
@@ -392,21 +397,72 @@ def api_upload_document(theme: str = Form(...), file: UploadFile = File(...)):
     document_id = storage.add_document(_conn, theme, safe_filename)
     theme_dir = DOCUMENTS_DIR / theme
     theme_dir.mkdir(parents=True, exist_ok=True)
-    dest = theme_dir / f"{document_id}_{safe_filename}"
+    dest = theme_dir / f"{document_id}_{_storable_stem(safe_filename)}{extension}"
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
+    _start_job(lambda: _run_document_job(document_id, dest, theme, safe_filename, judge, enhance))
+    return storage.get_document(_conn, document_id)
+
+
+def _start_job(job) -> None:
+    """Generation makes many judge calls (minutes), so it runs off the request.
+    Tests swap this for an inline call."""
+    threading.Thread(target=job, daemon=True).start()
+
+
+def _run_document_job(document_id: int, dest: Path, theme: str, source: str, judge, enhance: bool) -> None:
+    """queued -> enhancing (the judge rewrites the text as clean reference prose)
+    -> generating (DeepEval's Synthesizer) -> ready | error."""
+    source_path = dest
+    if enhance:
+        storage.set_document_status(_conn, document_id, "enhancing")
+        try:
+            source_path = enhance_document(dest, judge)
+        except Exception as e:  # noqa: BLE001 - reported on the document, not raised
+            storage.set_document_status(
+                _conn, document_id, "error", f"enhancing failed: {type(e).__name__}: {e}", goldens_created=0
+            )
+            return
+        if source_path != dest:
+            storage.set_document_enhanced(_conn, document_id, str(source_path))
+    storage.set_document_status(_conn, document_id, "generating")
+    _generate_for_document(document_id, source_path, theme, source, judge)
+
+
+def _storable_stem(name: str) -> str:
+    """The file name's stem reduced to [A-Za-z0-9_-]. DeepEval names a Chroma
+    collection after the saved file, and Chroma rejects spaces, brackets and
+    the like — the Synthesizer then silently finds 0 chunks and makes nothing."""
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(name).stem).strip("_-")
+    return stem or "document"
+
+
+def _generate_for_document(document_id: int, dest: Path, theme: str, source: str, judge) -> None:
+    """Runs golden generation for a saved document and records the outcome.
+    The run replaces whatever this document generated before, so re-uploading
+    or regenerating changes the dataset instead of stacking a second copy on
+    it. A run that creates nothing is an error the user needs to see."""
+    goldens_store.delete_generated_for(theme, source_document=source, source_document_id=document_id)
     try:
-        created = generate_goldens_from_document(str(dest), theme, safe_filename, judge)
-        storage.set_document_status(_conn, document_id, "ready")
+        created = generate_goldens_from_document(str(dest), theme, source, judge, document_id=document_id)
     except Exception as e:  # noqa: BLE001 - any generation failure is reported, not a 500
-        storage.set_document_status(_conn, document_id, "error", f"{type(e).__name__}: {e}")
-        return {**storage.get_document(_conn, document_id), "goldens_created": 0}
-    return {**storage.get_document(_conn, document_id), "goldens_created": created}
+        storage.set_document_status(_conn, document_id, "error", f"{type(e).__name__}: {e}", goldens_created=0)
+        return
+    if created:
+        storage.set_document_status(_conn, document_id, "ready", goldens_created=created)
+    else:
+        storage.set_document_status(
+            _conn, document_id, "error",
+            "DeepEval created no golden answers from this document: it found no usable "
+            "passages (the text may be too short, or data such as JSON rather than prose).",
+            goldens_created=0,
+        )
 
 
 class UrlDocument(BaseModel):
     theme: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     url: str = Field(min_length=1, max_length=2000)
+    enhance: bool = True
 
 
 @app.post("/api/documents/url")
@@ -427,18 +483,59 @@ def api_document_from_url(body: UrlDocument):
     host = re.sub(r"[^A-Za-z0-9.-]", "_", urlparse(final_url).netloc) or "page"
     dest = theme_dir / f"{document_id}_{host}.txt"
     dest.write_text(text, encoding="utf-8")
-    try:
-        created = generate_goldens_from_document(str(dest), body.theme, final_url, judge)
-        storage.set_document_status(_conn, document_id, "ready")
-    except Exception as e:  # noqa: BLE001 - any generation failure is reported, not a 500
-        storage.set_document_status(_conn, document_id, "error", f"{type(e).__name__}: {e}")
-        return {**storage.get_document(_conn, document_id), "goldens_created": 0}
-    return {**storage.get_document(_conn, document_id), "goldens_created": created}
+    _start_job(lambda: _run_document_job(document_id, dest, body.theme, final_url, judge, body.enhance))
+    return storage.get_document(_conn, document_id)
 
 
 @app.get("/api/documents")
 def api_list_documents(theme: str | None = None):
     return storage.list_documents(_conn, theme)
+
+
+@app.get("/api/documents/{document_id}")
+def api_get_document(document_id: int):
+    """One document's generation status, polled by the side panel while it works."""
+    doc = storage.get_document(_conn, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    return doc
+
+
+@app.get("/api/documents/{document_id}/enhanced")
+def api_get_enhanced_text(document_id: int):
+    """The AI-rewritten text golden generation actually read."""
+    doc = storage.get_document(_conn, document_id)
+    path = Path(doc["enhanced_path"]) if doc and doc.get("enhanced_path") else None
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="no enhanced text for this document")
+    return {"text": path.read_text(encoding="utf-8")}
+
+
+class DocumentRegenerate(BaseModel):
+    """Empty on purpose: a JSON body forces the CORS preflight, like every other POST."""
+
+    enhance: bool = True
+
+
+@app.post("/api/documents/{document_id}/regenerate")
+def api_regenerate_document(document_id: int, body: DocumentRegenerate):
+    """Reruns an already-uploaded document's generation, replacing the goldens
+    it produced last time — the dataset follows the document without the file
+    having to be uploaded again."""
+    doc = storage.get_document(_conn, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    try:
+        judge = build_judge(**_judge_overrides())
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    dest = (DOCUMENTS_DIR / doc["theme"]
+            / f'{document_id}_{_storable_stem(doc["filename"])}{Path(doc["filename"]).suffix}')
+    if not dest.is_file():
+        raise HTTPException(status_code=409, detail="the uploaded file is gone; upload it again")
+    storage.set_document_status(_conn, document_id, "queued")
+    _start_job(lambda: _run_document_job(document_id, dest, doc["theme"], doc["filename"], judge, body.enhance))
+    return storage.get_document(_conn, document_id)
 
 
 @app.delete("/api/documents/{document_id}")

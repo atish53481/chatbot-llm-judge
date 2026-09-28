@@ -71,9 +71,23 @@ def init_db(path: str) -> sqlite3.Connection:
                 filename TEXT NOT NULL,
                 uploaded_at TEXT NOT NULL,
                 status TEXT NOT NULL,
-                error TEXT
+                error TEXT,
+                goldens_created INTEGER,
+                enhanced_path TEXT
             )
             """
+        )
+        # Databases from before background generation lack these columns.
+        doc_columns = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
+        for column, kind in (("goldens_created", "INTEGER"), ("enhanced_path", "TEXT")):
+            if column not in doc_columns:
+                conn.execute(f"ALTER TABLE documents ADD COLUMN {column} {kind}")
+        # A generation job lives in the backend process: one still running when
+        # the backend stopped will never finish.
+        conn.execute(
+            "UPDATE documents SET status = 'error', error = ? "
+            "WHERE status IN ('queued', 'processing', 'enhancing', 'generating')",
+            ("interrupted: the backend stopped before this document finished; upload it again",),
         )
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         _migrate_targets(conn)
@@ -264,20 +278,31 @@ def add_document(conn: sqlite3.Connection, theme: str, filename: str) -> int:
     with _LOCK:
         cur = conn.execute(
             "INSERT INTO documents (theme, filename, uploaded_at, status, error) VALUES (?, ?, ?, ?, ?)",
-            (theme, filename, _now_iso(), "processing", None),
+            (theme, filename, _now_iso(), "queued", None),
         )
         conn.commit()
         return cur.lastrowid
 
 
 def set_document_status(
-    conn: sqlite3.Connection, document_id: int, status: str, error: str | None = None
+    conn: sqlite3.Connection,
+    document_id: int,
+    status: str,
+    error: str | None = None,
+    goldens_created: int | None = None,
 ) -> None:
+    """status: queued -> enhancing (optional) -> generating -> ready | error."""
     with _LOCK:
         conn.execute(
-            "UPDATE documents SET status = ?, error = ? WHERE id = ?",
-            (status, error, document_id),
+            "UPDATE documents SET status = ?, error = ?, goldens_created = ? WHERE id = ?",
+            (status, error, goldens_created, document_id),
         )
+        conn.commit()
+
+
+def set_document_enhanced(conn: sqlite3.Connection, document_id: int, enhanced_path: str) -> None:
+    with _LOCK:
+        conn.execute("UPDATE documents SET enhanced_path = ? WHERE id = ?", (enhanced_path, document_id))
         conn.commit()
 
 

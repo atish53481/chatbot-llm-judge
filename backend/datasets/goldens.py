@@ -95,13 +95,19 @@ def shipped_health() -> list[dict]:
 def reset_to_defaults() -> int:
     """Puts every shipped theme back to its default goldens; returns how many.
 
-    Themes that are not shipped (a chatbot's own golden set) are left as they are.
+    This file is the reference set. The panel calls this on every load, so hand
+    edits to a shipped theme last one session. A document's generated goldens
+    are kept: the document row outlives the session, and deleting or
+    regenerating it is what removes them (delete_generated_for). A theme the
+    shipped set does not include is a chatbot's own golden set, and keeps all
+    of its rows.
     """
     with open(DEFAULT_GOLDENS_PATH, "r", encoding="utf-8") as f:
         defaults = json.load(f)
     shipped = {row["theme"] for row in defaults}
     with _LOCK:
-        kept = [row for row in _read_all() if row["theme"] not in shipped]
+        kept = [row for row in _read_all()
+                if row["theme"] not in shipped or row.get("source") == "synthesized"]
         _write_all(defaults + kept)
     return len(defaults)
 
@@ -122,6 +128,7 @@ def add_golden(
     categories: list[str] | None = None,
     source: str = "manual",
     source_document: str | None = None,
+    source_document_id: int | None = None,
 ) -> dict:
     with _LOCK:
         rows = _read_all()
@@ -134,10 +141,34 @@ def add_golden(
             "categories": categories or [],
             "source": source,
             "source_document": source_document,
+            "source_document_id": source_document_id,
         }
         rows.append(new_row)
         _write_all(rows)
         return new_row
+
+
+def delete_generated_for(
+    theme: str, source_document: str | None = None, source_document_id: int | None = None
+) -> int:
+    """Removes the goldens a document generated, so re-uploading it or asking the
+    panel to regenerate replaces the set instead of stacking a second one on top.
+    Matches on the document's id, or on its file name — a re-upload is a new
+    document row, so the name is what ties the two together. Returns how many."""
+    with _LOCK:
+        rows = _read_all()
+
+        def generated_by_it(row: dict) -> bool:
+            if row.get("source") != "synthesized" or row.get("theme") != theme:
+                return False
+            if source_document_id is not None and row.get("source_document_id") == source_document_id:
+                return True
+            return source_document is not None and row.get("source_document") == source_document
+
+        remaining = [row for row in rows if not generated_by_it(row)]
+        if len(remaining) != len(rows):
+            _write_all(remaining)
+        return len(rows) - len(remaining)
 
 
 def update_golden(

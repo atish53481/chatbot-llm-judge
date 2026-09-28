@@ -113,6 +113,44 @@ def test_runs_record_cases_run_and_legacy_dbs_gain_the_column(tmp_path):
     assert [r["cases_run"] for r in rows] == [None, 3]
 
 
+def test_documents_record_goldens_created_and_enhanced_path(tmp_path):
+    conn = storage.init_db(str(tmp_path / "d.db"))
+    doc_id = storage.add_document(conn, "t", "notes.txt")
+    assert storage.get_document(conn, doc_id)["status"] == "queued"
+    storage.set_document_status(conn, doc_id, "enhancing")
+    storage.set_document_enhanced(conn, doc_id, "/x/1_notes_enhanced.txt")
+    storage.set_document_status(conn, doc_id, "ready", goldens_created=6)
+    doc = storage.get_document(conn, doc_id)
+    assert (doc["status"], doc["goldens_created"], doc["enhanced_path"]) == ("ready", 6, "/x/1_notes_enhanced.txt")
+
+
+def test_unfinished_documents_are_marked_interrupted_on_start(tmp_path):
+    path = str(tmp_path / "d.db")
+    conn = storage.init_db(path)
+    busy = storage.add_document(conn, "t", "a.txt")
+    storage.set_document_status(conn, busy, "generating")
+    done = storage.add_document(conn, "t", "b.txt")
+    storage.set_document_status(conn, done, "ready", goldens_created=2)
+    conn.close()
+    conn = storage.init_db(path)
+    assert storage.get_document(conn, busy)["status"] == "error"
+    assert "interrupted" in storage.get_document(conn, busy)["error"]
+    assert storage.get_document(conn, done)["status"] == "ready"
+
+
+def test_legacy_documents_table_gains_the_new_columns(tmp_path):
+    path = str(tmp_path / "legacy.db")
+    legacy = sqlite3.connect(path)
+    legacy.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, theme TEXT NOT NULL,"
+                   " filename TEXT NOT NULL, uploaded_at TEXT NOT NULL, status TEXT NOT NULL, error TEXT)")
+    legacy.execute("INSERT INTO documents (theme, filename, uploaded_at, status) VALUES ('t', 'a.txt', 'x', 'ready')")
+    legacy.commit()
+    legacy.close()
+    conn = storage.init_db(path)
+    doc = storage.list_documents(conn)[0]
+    assert doc["goldens_created"] is None and doc["enhanced_path"] is None
+
+
 def test_runs_record_how_they_were_judged(tmp_path):
     conn = storage.init_db(str(tmp_path / "t.db"))
     target_id = storage.add_target(conn, "bot", "http", {})

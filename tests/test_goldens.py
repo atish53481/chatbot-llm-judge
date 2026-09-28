@@ -113,3 +113,51 @@ def test_add_golden_records_synthesized_source(temp_goldens_file):
     )
     assert row["source"] == "synthesized"
     assert row["source_document"] == "policy.pdf"
+
+
+def test_reset_restores_the_reference_set_and_keeps_generated_goldens(tmp_path, monkeypatch):
+    # The panel resets on every load: manual edits to a shipped theme are undone,
+    # but a document's generated goldens stay until the document is deleted.
+    defaults = tmp_path / "goldens.default.json"
+    defaults.write_text(json.dumps([
+        {"id": "g_0001", "theme": "general_support", "question": "Shipped?", "expected_answer": "Yes.",
+         "context": [], "categories": []},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(g, "DEFAULT_GOLDENS_PATH", str(defaults))
+    g.add_golden(theme="general_support", question="Manual edit?", expected_answer="Scratch.",
+                 context=[], categories=[])
+    g.add_golden(theme="general_support", question="From the PRD?", expected_answer="Scratch.",
+                 context=["ctx"], categories=[], source="synthesized", source_document="prd.docx")
+    g.reset_to_defaults()
+    assert [row["question"] for row in g.load_goldens(theme="general_support")] == ["Shipped?", "From the PRD?"]
+
+
+def test_delete_generated_for_document_leaves_other_documents_alone(temp_goldens_file):
+    g.add_golden(theme="general_support", question="From faq?", expected_answer="A", context=[],
+                 categories=[], source="synthesized", source_document="faq.txt", source_document_id=7)
+    g.add_golden(theme="general_support", question="From other?", expected_answer="A", context=[],
+                 categories=[], source="synthesized", source_document="other.txt", source_document_id=8)
+
+    assert g.delete_generated_for("general_support", source_document_id=7) == 1
+    assert {row["question"] for row in g.load_goldens(theme="general_support")} == {
+        "What is your refund window?", "From other?",
+    }
+
+
+def test_delete_generated_for_document_matches_a_reupload_by_name(temp_goldens_file):
+    # A re-upload is a new document row, so the file name is what ties them.
+    g.add_golden(theme="general_support", question="Old set", expected_answer="A", context=[],
+                 categories=[], source="synthesized", source_document="faq.txt", source_document_id=7)
+    assert g.delete_generated_for("general_support", source_document="faq.txt") == 1
+    assert [row["question"] for row in g.load_goldens(theme="general_support")] == ["What is your refund window?"]
+
+
+def test_delete_generated_for_document_never_touches_hand_written_goldens(temp_goldens_file):
+    assert g.delete_generated_for("general_support", source_document="faq.txt") == 0
+    assert len(g.load_goldens(theme="general_support")) == 1
+
+
+def test_add_golden_records_the_document_id(temp_goldens_file):
+    row = g.add_golden(theme="general_support", question="q", expected_answer="a",
+                       source="synthesized", source_document="faq.txt", source_document_id=12)
+    assert row["source_document_id"] == 12
