@@ -155,6 +155,13 @@ reloading the extension) restores the shipped sets from
 `backend/datasets/goldens.default.json`. To change the defaults, edit that file.
 A golden set with your own theme name is not shipped, so it is never reset.
 
+If a shipped set is missing rows, the side panel says how many above the list;
+**Reset to defaults** brings them back. Every change to the golden file is logged,
+one JSON line each, in `backend/datasets/goldens_changes.log` (not committed): the
+time, the action (`add_golden`, `update_golden`, `delete_golden`, `reset_to_defaults`,
+`delete_generated_for`), the ids added, removed or changed, and each theme's row
+count before and after. When rows vanish, that log says what removed them.
+
 Three ways to fill a golden set, all in the side panel: add answers by hand; upload a
 document (PDF, TXT, DOCX, MD); or paste the chatbot's help / FAQ page address under
 **Generate from URL**. The last two let DeepEval's Synthesizer write the questions,

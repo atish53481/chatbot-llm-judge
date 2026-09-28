@@ -22,6 +22,7 @@ RUN_EXTRA_COLUMNS = (
     ("target_calls", "INTEGER"),
     ("duration_s", "REAL"),
     ("judge_spread", "REAL"),
+    ("cases_skipped", "INTEGER"),
 )
 
 
@@ -215,14 +216,15 @@ def record_run(
     target_calls: int | None = None,
     duration_s: float | None = None,
     judge_spread: float | None = None,
+    cases_skipped: int | None = None,
 ) -> int:
     with _LOCK:
         cur = conn.execute(
             "INSERT INTO runs (target_id, metric_key, score, passed, ts, cases_run, judge_model,"
-            " judge_tokens, judge_calls, target_calls, duration_s, judge_spread)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " judge_tokens, judge_calls, target_calls, duration_s, judge_spread, cases_skipped)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (target_id, metric_key, score, int(passed), ts, cases_run, judge_model,
-             judge_tokens, judge_calls, target_calls, duration_s, judge_spread),
+             judge_tokens, judge_calls, target_calls, duration_s, judge_spread, cases_skipped),
         )
         conn.commit()
         return cur.lastrowid

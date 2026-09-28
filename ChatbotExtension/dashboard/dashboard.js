@@ -656,12 +656,14 @@ function renderTrendTable(historyByMetric, metrics) {
           const run = historyByMetric[m.key].find((r) => r.ts === ts);
           if (!run) return el("td", { className: "num" }, "–");
           const unstable = typeof run.judge_spread === "number" && run.judge_spread > UNSTABLE_SPREAD;
+          const title = [
+            run.cases_run ? `${run.cases_run} cases` : "",
+            run.cases_skipped ? `${run.cases_skipped} skipped (too long for the chatbot)` : "",
+            unstable ? `judge unstable: two scorings differed by ${formatScore(run.judge_spread)}` : "",
+          ].filter(Boolean).join(" · ");
           return el(
             "td",
-            {
-              className: "num",
-              title: unstable ? `Judge unstable: two scorings differed by ${formatScore(run.judge_spread)}` : undefined,
-            },
+            { className: "num", title: title || undefined },
             `${formatScore(run.score)} ${run.passed ? "✓" : "✕"}${unstable ? " ⚠" : ""}`,
           );
         }),

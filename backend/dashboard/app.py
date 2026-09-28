@@ -454,6 +454,12 @@ def api_list_goldens(theme: str | None = None):
     return goldens_store.load_goldens(theme=theme)
 
 
+@app.get("/api/goldens/health")
+def api_goldens_health():
+    """Per shipped theme, how many default goldens are missing (the panel offers Reset)."""
+    return goldens_store.shipped_health()
+
+
 class GoldenReset(BaseModel):
     """Empty on purpose: a JSON body forces the CORS preflight, like every other POST."""
 

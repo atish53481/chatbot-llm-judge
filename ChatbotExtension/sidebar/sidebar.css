@@ -289,6 +289,13 @@ summary {
   margin-top: 8px;
 }
 
+.golden-missing {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-left: 3px solid var(--status-critical);
+  color: var(--text-primary);
+}
+
 .threshold-row .no-cases {
   color: var(--text-secondary);
   font-size: 11px;

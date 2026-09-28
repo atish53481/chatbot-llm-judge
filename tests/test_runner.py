@@ -457,3 +457,11 @@ def test_without_the_check_nothing_is_scored_twice(tmp_path):
     result = run_spec(spec, judge=_judge(), target=CannedChatbot(), target_id=target_id, conn=conn)
     assert metric.measure.call_count == 1
     assert result["judge_spread"] is None and result["judge_unstable"] is False
+
+
+def test_skipped_cases_are_saved_with_the_run(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("short?"), _case("x" * 50)], _fake_metric([0.9], [True]))
+    result = run_spec(spec, judge=object(), target=_LimitedBot(20), target_id=target_id, conn=conn)
+    assert result["cases_skipped"] == 1
+    assert storage.history(conn, target_id, "fake_metric")[0]["cases_skipped"] == 1

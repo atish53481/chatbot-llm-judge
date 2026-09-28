@@ -812,3 +812,11 @@ def test_run_can_check_judge_consistency_and_reports_how_it_was_judged(client, a
     history = client.get("/api/history", params={
         "target_id": target["id"], "metric_key": "answer_relevancy"}).json()
     assert history[0]["judge_spread"] == 0 and "duration_s" in history[0]
+
+
+def test_goldens_health_reports_missing_shipped_rows(client):
+    shipped = client.get("/api/goldens", params={"theme": "general_support"}).json()
+    client.delete(f"/api/goldens/{shipped[0]['id']}")
+    health = {h["theme"]: h for h in client.get("/api/goldens/health").json()}
+    assert health["general_support"]["missing"] == 1
+    assert health["generic"]["missing"] == 0

@@ -80,9 +80,10 @@ function formatTokens(tokens) {
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
 }
 
-// "14.2k tokens · ⚠ judge unstable (0.40)": how a finished run was judged.
+// "2 skipped (too long) · 14.2k tokens · ⚠ judge unstable (0.40)": how a finished run was judged.
 function judgingSummary(result) {
   const parts = [];
+  if (result.cases_skipped) parts.push(`${result.cases_skipped} skipped (too long)`);
   if (result.judge && typeof result.judge.tokens === "number") parts.push(`${formatTokens(result.judge.tokens)} tokens`);
   if (result.judge_unstable) parts.push(`⚠ judge unstable (${formatScore(result.judge_spread)})`);
   return parts.join(" · ");

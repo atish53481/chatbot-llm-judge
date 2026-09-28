@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 
 GOLDENS_PATH = os.path.join(os.path.dirname(__file__), "goldens.json")
 # The shipped golden sets. The side panel restores them on every load, so edits
@@ -25,6 +27,10 @@ def _read_all() -> list[dict]:
 
 
 def _write_all(rows: list[dict]) -> None:
+    try:
+        before = _read_all()
+    except (OSError, ValueError):
+        before = []
     tmp_path = GOLDENS_PATH + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -34,6 +40,56 @@ def _write_all(rows: list[dict]) -> None:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise
+    # The caller (add_golden, delete_golden, reset_to_defaults, ...) names the action.
+    _log_change(sys._getframe(1).f_code.co_name, before, rows)
+
+
+def _changes_log_path() -> str:
+    return os.path.join(os.path.dirname(GOLDENS_PATH), "goldens_changes.log")
+
+
+def _log_change(action: str, before: list[dict], after: list[dict]) -> None:
+    """Appends one JSON line saying what a write changed, so rows that vanish can
+    be traced to what removed them. Logging never blocks the write itself."""
+    old = {r["id"]: r for r in before if "id" in r}
+    new = {r["id"]: r for r in after if "id" in r}
+    added = [i for i in new if i not in old]
+    removed = [i for i in old if i not in new]
+    changed = [i for i in new if i in old and new[i] != old[i]]
+    if not (added or removed or changed):
+        return
+    themes = sorted({r.get("theme") for r in [*before, *after] if r.get("id") in {*added, *removed, *changed}})
+    entry = {
+        "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "action": action,
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "themes": {
+            t: {"before": sum(r.get("theme") == t for r in before),
+                "after": sum(r.get("theme") == t for r in after)}
+            for t in themes
+        },
+    }
+    try:
+        with open(_changes_log_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def shipped_health() -> list[dict]:
+    """Per shipped theme: how many default rows ship and how many are present."""
+    with open(DEFAULT_GOLDENS_PATH, "r", encoding="utf-8") as f:
+        defaults = json.load(f)
+    with _LOCK:
+        present_ids = {r["id"] for r in _read_all()}
+    health: dict[str, dict] = {}
+    for row in defaults:
+        h = health.setdefault(row["theme"], {"theme": row["theme"], "shipped": 0, "present": 0, "missing": 0})
+        h["shipped"] += 1
+        h["present" if row["id"] in present_ids else "missing"] += 1
+    return list(health.values())
 
 
 def reset_to_defaults() -> int:

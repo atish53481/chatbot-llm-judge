@@ -219,8 +219,10 @@ def run_spec(
         conn, target_id, spec.key, avg, passed, _now_iso(), cases_run=len(rows),
         judge_model=judge_model, judge_tokens=judge_tokens, judge_calls=judge_calls,
         target_calls=chatbot_calls, duration_s=duration, judge_spread=spread,
+        cases_skipped=skipped,
     )
     return {
+        "cases_skipped": skipped,
         "judge": {"model": judge_model, "tokens": judge_tokens, "calls": judge_calls},
         "chatbot_calls": chatbot_calls,
         "duration_s": duration,

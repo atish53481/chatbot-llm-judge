@@ -197,8 +197,26 @@ async function loadDocuments() {
   list.replaceChildren(...docs.map(documentRow));
 }
 
+// Shipped golden sets can lose rows (a delete in this panel lasts until the next
+// load); say so, and point at Reset to defaults, instead of scoring on less.
+async function renderGoldenHealth(theme) {
+  const note = $("golden-missing");
+  let health = [];
+  try {
+    health = await api("/api/goldens/health");
+  } catch {
+    // Health is advisory: an old backend without the endpoint shows nothing.
+  }
+  const h = health.find((row) => row.theme === theme);
+  note.classList.toggle("hidden", !h || h.missing === 0);
+  note.textContent = h && h.missing
+    ? `${h.missing} of ${h.shipped} shipped golden answers in '${theme}' are missing. Press Reset to defaults to bring them back.`
+    : "";
+}
+
 async function loadGoldens() {
   const target = currentTarget();
+  renderGoldenHealth(target ? themeOf(target) : null);
   const list = $("golden-list");
   // Re-rendering the list would detach the form while it sits inside it.
   if (list.contains($("golden-form"))) resetGoldenForm();
