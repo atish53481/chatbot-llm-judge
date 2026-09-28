@@ -260,6 +260,19 @@ body.dash {
   100% { margin-left: 100%; }
 }
 
+.run-summary { margin: 6px 0; }
+.run-verdict { margin: 0 0 4px; font-weight: 600; }
+.run-verdict.status-pass { color: var(--success-text); }
+.run-verdict.status-fail { color: var(--status-critical); }
+.recent-runs { margin: 4px 0; }
+.recent-runs .status-pass { color: var(--success-text); }
+.recent-runs .status-fail { color: var(--status-critical); }
+.metric-meaning { margin: 6px 0; }
+.metric-meaning summary { cursor: pointer; font-weight: 600; }
+.case-filter { margin: 8px 0; }
+.case-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.case-row.case-failed { border-left: 3px solid var(--status-critical); padding-left: 8px; }
+
 .case-detail {
   margin-top: 6px;
   padding-top: 6px;

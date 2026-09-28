@@ -309,17 +309,91 @@ async function stopRun(control) {
   }
 }
 
-// What the dashboard's Details panel shows for one metric's last run.
+// What the dashboard's Details panel and the PDF report show for one metric's
+// last run. Runs saved before these fields existed simply lack them.
 function caseDetailsOf(result) {
   return {
     finishedAt: Date.now(),
     status: result.status,
     error: result.error || null,
     rows: result.rows || [],
+    score: typeof result.score === "number" ? result.score : null,
     threshold: result.threshold,
     direction: result.direction,
     note: result.note || null,
+    casesRun: result.cases_run ?? null,
+    casesTotal: result.cases_total ?? null,
+    casesSkipped: result.cases_skipped ?? null,
+    judge: result.judge || null,
+    durationS: result.duration_s ?? null,
+    judgeSpread: result.judge_spread ?? null,
+    judgeUnstable: Boolean(result.judge_unstable),
   };
+}
+
+// Failed cases first (they need attention), each group in run order.
+function casesFailedFirst(rows) {
+  return [...rows.filter((r) => !r.passed), ...rows.filter((r) => r.passed)];
+}
+
+// "Average 0.62 < 0.70 → fail": how a run's score met (or missed) its threshold.
+function runVerdict(details) {
+  if (typeof details.score !== "number") return "";
+  const lower = details.direction === "lower";
+  const passed = details.status === "pass";
+  const sign = lower ? (passed ? "≤" : ">") : (passed ? "≥" : "<");
+  return `Average ${formatScore(details.score)} ${sign} ${formatScore(details.threshold)} → ${passed ? "pass" : "fail"}`;
+}
+
+// Label / text pairs describing how a run was judged (missing fields left out).
+function runFacts(details) {
+  const facts = [];
+  const rows = details.rows || [];
+  if (rows.length) {
+    const failed = rows.filter((r) => !r.passed).length;
+    const skipped = details.casesSkipped ? ` · ${details.casesSkipped} skipped (too long)` : "";
+    facts.push(["Cases", `${rows.length - failed} passed · ${failed} failed${skipped}`]);
+  }
+  if (details.judge && details.judge.model) facts.push(["Judge", details.judge.model]);
+  if (details.judge && typeof details.judge.tokens === "number") {
+    facts.push(["Judge tokens", `${formatTokens(details.judge.tokens)} (${details.judge.calls} calls)`]);
+  }
+  if (typeof details.durationS === "number") facts.push(["Duration", `${details.durationS.toFixed(1)} s`]);
+  if (typeof details.judgeSpread === "number") {
+    facts.push(["Judge consistency", `${details.judgeUnstable ? "⚠ unstable" : "steady"}: widest gap between two scorings ${formatScore(details.judgeSpread)}`]);
+  }
+  return facts;
+}
+
+// Label / text pairs explaining what a metric measures and how it is scored.
+function metricMeaning(metric) {
+  const pairs = [];
+  if (metric.description) pairs.push(["Measures", metric.description]);
+  if (metric.scale_hint) {
+    const direction = metric.direction === "lower"
+      ? "Lower is better: shown as 1 − DeepEval's score, and the threshold is a maximum."
+      : "Higher is better: the threshold is a minimum.";
+    pairs.push(["Scale", `${metric.scale_hint}. ${direction}`]);
+  }
+  if (metric.scores_on && metric.scores_on.length) {
+    pairs.push(["The judge reads", metric.scores_on.map(fieldLabel).join(", ")]);
+  }
+  if (metric.criteria) pairs.push(["Rubric", metric.criteria]);
+  pairs.push(["Run score", "The average of the case scores; the run passes when that average meets the threshold."]);
+  return pairs;
+}
+
+// One case as plain text, for pasting into a bug report.
+function caseAsText(metric, row, direction, threshold) {
+  const lines = [
+    `${metric.title}: ${row.passed ? "pass" : "fail"} · ${formatScore(row.score)} ${comparator(direction)} ${formatScore(threshold)}`,
+    `Question: ${row.input || row.question || ""}`,
+    `Actual result: ${row.actual_output || ""}`,
+  ];
+  if (row.expected_output) lines.push(`Expected result: ${row.expected_output}`);
+  if (row.context && row.context.length) lines.push(`Context:\n- ${row.context.join("\n- ")}`);
+  lines.push(`Why: ${row.reason || "No reason given."}`);
+  return lines.join("\n");
 }
 
 async function saveCaseDetails(targetId, metricKey, result) {

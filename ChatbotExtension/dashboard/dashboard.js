@@ -26,6 +26,9 @@ const state = {
   runningKeys: new Set(),
   expandedDetailKeys: new Set(),
   caseDetailsCache: {},
+  // Details panels showing failed cases only, and each metric's recent run scores.
+  failedOnlyKeys: new Set(),
+  detailHistory: {},
 };
 
 function currentTarget() {
@@ -324,26 +327,115 @@ function caseDetailPanel(metric, details) {
   }
   const direction = details.direction || metric.direction;
   const threshold = typeof details.threshold === "number" ? details.threshold : thresholdFor(metric, state.thresholds);
+  const failedOnly = state.failedOnlyKeys.has(metric.key);
+  const failedCount = details.rows.filter((r) => !r.passed).length;
+  const rows = failedOnly ? details.rows.filter((r) => !r.passed) : casesFailedFirst(details.rows);
   return el(
     "div",
     { className: "case-detail" },
     el("p", { className: "muted small" }, `As of ${formatRunTime(details.finishedAt)} · each case scored ${comparator(direction)} ${formatScore(threshold)}`),
+    runSummary(details),
+    recentRuns(metric),
+    el(
+      "details",
+      { className: "metric-meaning" },
+      el("summary", {}, "What this measures"),
+      factList(metricMeaning(metric)),
+    ),
     details.note ? el("p", { className: "case-note" }, `⚠ ${details.note}`) : null,
     el(
-      "ul",
-      { className: "case-list" },
-      ...details.rows.map((row) => el(
-        "li",
-        { className: "case-row" },
-        el(
-          "p",
-          { className: `case-score status-${row.passed ? "pass" : "fail"}` },
-          `${row.passed ? "✓ pass" : "✕ fail"} · ${formatScore(row.score)} ${comparator(direction)} ${formatScore(threshold)}`,
-        ),
-        el("dl", { className: "case-fields" }, ...caseFields(metric, row)),
-      )),
+      "div",
+      { className: "segmented case-filter", role: "group", "aria-label": "Cases to show" },
+      el("button", {
+        type: "button", "aria-pressed": String(!failedOnly),
+        onclick: () => { state.failedOnlyKeys.delete(metric.key); renderMetricGrid(); },
+      }, `All (${details.rows.length})`),
+      el("button", {
+        type: "button", "aria-pressed": String(failedOnly),
+        onclick: () => { state.failedOnlyKeys.add(metric.key); renderMetricGrid(); },
+      }, `Failed only (${failedCount})`),
     ),
+    rows.length
+      ? el(
+        "ul",
+        { className: "case-list" },
+        ...rows.map((row) => el(
+          "li",
+          { className: `case-row${row.passed ? "" : " case-failed"}` },
+          el(
+            "div",
+            { className: "case-row-head" },
+            el(
+              "p",
+              { className: `case-score status-${row.passed ? "pass" : "fail"}` },
+              `${row.passed ? "✓ pass" : "✕ fail"} · ${formatScore(row.score)} ${comparator(direction)} ${formatScore(threshold)}`,
+            ),
+            copyCaseButton(metric, row, direction, threshold),
+          ),
+          el("dl", { className: "case-fields" }, ...caseFields(metric, row)),
+        )),
+      )
+      : el("p", { className: "case-detail-empty muted" }, "No failed cases in the last run."),
   );
+}
+
+// Verdict and how the run was judged, above the cases.
+function runSummary(details) {
+  const verdict = runVerdict(details);
+  const facts = runFacts(details);
+  if (!verdict && !facts.length) return null;
+  return el(
+    "div",
+    { className: "run-summary" },
+    verdict ? el("p", { className: `run-verdict status-${details.status}` }, verdict) : null,
+    facts.length ? factList(facts) : null,
+  );
+}
+
+function factList(pairs) {
+  return el("dl", { className: "case-fields fact-list" }, ...pairs.flatMap(([label, value]) => [
+    el("dt", {}, label),
+    el("dd", {}, value),
+  ]));
+}
+
+// The metric's last few run scores, oldest first, so one dip reads as a dip.
+function recentRuns(metric) {
+  const runs = (state.detailHistory[metric.key] || []).slice(-5);
+  if (runs.length < 2) return null;
+  return el(
+    "p",
+    { className: "recent-runs small" },
+    el("span", { className: "muted" }, `Last ${runs.length} runs: `),
+    ...runs.flatMap((run, i) => [
+      i ? el("span", { className: "muted" }, " → ") : null,
+      el("span", { className: `status-${run.passed ? "pass" : "fail"}`, title: formatRunTime(run.ts) }, formatScore(run.score)),
+    ]),
+  );
+}
+
+function copyCaseButton(metric, row, direction, threshold) {
+  const button = el("button", { type: "button", className: "small-button", title: "Copy this case as text" }, "Copy");
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(caseAsText(metric, row, direction, threshold));
+      button.textContent = "Copied";
+    } catch {
+      button.textContent = "Copy failed";
+    }
+    setTimeout(() => { button.textContent = "Copy"; }, 1500);
+  });
+  return button;
+}
+
+async function loadDetailHistory(key) {
+  const target = currentTarget();
+  if (!target) return;
+  try {
+    state.detailHistory[key] = await api(`/api/history?target_id=${target.id}&metric_key=${encodeURIComponent(key)}`);
+  } catch {
+    state.detailHistory[key] = [];  // the panel works without it
+  }
 }
 
 // Label / value pairs for one case: what was asked, what came back, what was
@@ -361,6 +453,9 @@ function caseFields(metric, row) {
     add("Expected outcome", row.expected_output);
   } else {
     add("Question", row.input && row.input !== row.question ? row.input : row.question);
+    if (row.scores && row.scores.length === 2) {
+      add("Two scorings", `${formatScore(row.scores[0])} and ${formatScore(row.scores[1])} (averaged)`);
+    }
     add("Actual result", row.actual_output);
     add("Expected result", row.expected_output);
     if (row.context && row.context.length) {
@@ -382,6 +477,7 @@ function contextLabel(metric, row) {
 function refreshExpandedDetail(key, result) {
   if (!state.expandedDetailKeys.has(key)) return;
   state.caseDetailsCache[key] = caseDetailsOf(result);
+  loadDetailHistory(key).then(renderMetricGrid);
 }
 
 async function toggleCardDetails(key) {
@@ -392,7 +488,9 @@ async function toggleCardDetails(key) {
   }
   state.expandedDetailKeys.add(key);
   const target = currentTarget();
-  if (target) state.caseDetailsCache[key] = await loadCaseDetails(target.id, key);
+  if (target) {
+    [state.caseDetailsCache[key]] = await Promise.all([loadCaseDetails(target.id, key), loadDetailHistory(key)]);
+  }
   renderMetricGrid();
 }
 
@@ -826,6 +924,15 @@ $("chat-form").addEventListener("submit", async (event) => {
     input.disabled = false;
     input.focus();
   }
+});
+
+$("report-button").addEventListener("click", () => {
+  const target = currentTarget();
+  if (!target) {
+    setStatus("Pick a chatbot first.", true);
+    return;
+  }
+  window.open(chrome.runtime.getURL(`report/report.html?target=${target.id}`), "_blank");
 });
 
 $("run-all-button").addEventListener("click", () => {

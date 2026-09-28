@@ -138,6 +138,20 @@ reply twice (the chatbot is asked once, the judge costs about twice as much). Ea
 case scores the average of the two; a run whose two scorings of one case differ by
 more than 0.15 is flagged ⚠ *judge unstable*, in the result and in the trend table.
 
+## Details and the PDF report
+
+Each dashboard card's **Details** shows the latest run: the verdict ("Average 0.62 <
+0.70 → fail"), cases passed / failed / skipped, the judge model, tokens and duration,
+the last few run scores, and *What this measures* (description, scale, the fields
+the judge reads, the G-Eval rubric). Failed cases come first; **Failed only** hides
+the rest, and **Copy** puts one case on the clipboard as text.
+
+**Download report (PDF)** in the dashboard header opens a printable report of the
+selected chatbot (cover with the average score, a summary table of every metric,
+each run metric's meaning, verdict and failed cases, and how to read the scores)
+and opens the print dialog: choose *Save as PDF*. Case details come from the runs
+this browser made; a metric run elsewhere shows its score without the cases.
+
 ## Golden answers
 
 Each chatbot is judged against one golden set (theme). `generic`, the default, fits
