@@ -91,6 +91,47 @@ function summaryTable(metrics, latestByKey, thresholds) {
   );
 }
 
+// Details saved by this browser belong to this run only if not older than it.
+function detailsFor(run, details) {
+  return details && run && details.status !== "error" && details.finishedAt >= Date.parse(run.ts) - 60_000
+    ? details : null;
+}
+
+// Failed metrics, furthest from passing first, each with the judge's reasons
+// and what to change in the chatbot or check in the test.
+function actionPlan(metrics, latestByKey, detailsByKey, thresholds) {
+  const failed = metrics
+    .filter((m) => latestByKey[m.key] && !latestByKey[m.key].passed)
+    .map((m) => {
+      const run = latestByKey[m.key];
+      const threshold = thresholdFor(m, thresholds);
+      const shortfall = m.direction === "lower" ? run.score - threshold : threshold - run.score;
+      return { metric: m, run, threshold, shortfall };
+    })
+    .sort((a, b) => b.shortfall - a.shortfall);
+  if (!failed.length) {
+    return el("section", {}, el("h2", {}, "Action plan"), el("p", {}, "Every metric that ran passed its threshold."));
+  }
+  return el(
+    "section",
+    { className: "action-plan" },
+    el("h2", {}, `Action plan: ${failed.length} failed metric${failed.length === 1 ? "" : "s"}`),
+    el("p", { className: "muted small" }, "Furthest from passing first. A failing score does not always mean the chatbot is wrong: check the test too."),
+    ...failed.map(({ metric, run, threshold }) => {
+      const details = detailsFor(run, detailsByKey[metric.key]);
+      const failedCases = details ? details.rows.filter((r) => !r.passed).length : null;
+      return el(
+        "div",
+        { className: "plan-item" },
+        el("h3", {}, metric.title, " ", resultCell(run)),
+        el("p", {}, gapText(metric.direction, run.score, threshold),
+          failedCases !== null ? ` · ${failedCases} of ${details.rows.length} cases failed` : ""),
+        improvementBlock(metric, details),
+      );
+    }),
+  );
+}
+
 function caseBlock(metric, row, direction, threshold) {
   const pairs = [["Question", row.input || row.question || ""], ["Actual result", row.actual_output || ""]];
   if (row.expected_output) pairs.push(["Expected result", row.expected_output]);
@@ -182,6 +223,7 @@ async function build() {
   $("report").replaceChildren(
     cover(target, judge, metrics, latestByKey),
     summaryTable(metrics, latestByKey, thresholds),
+    actionPlan(metrics, latestByKey, details, thresholds),
     el("h2", { className: "page-break" }, "Metric details"),
     ...ranMetrics.map((m) => metricSection(m, latestByKey[m.key], details[m.key], thresholds)),
     appendix(),

@@ -1006,3 +1006,20 @@ def test_goldens_health_reports_missing_shipped_rows(client):
     health = {h["theme"]: h for h in client.get("/api/goldens/health").json()}
     assert health["general_support"]["missing"] == 1
     assert health["generic"]["missing"] == 0
+
+
+def test_metrics_carry_improvement_advice(client):
+    rows = {m["key"]: m for m in client.get("/api/metrics").json()}
+    assert rows["faithfulness"]["improve"]["chatbot"]
+    assert rows["prompt_injection"]["improve"]["tests"]
+
+
+def test_citation_quality_is_not_applicable_without_the_chatbots_sources(client):
+    plain = _create_target(client)
+    rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={plain['id']}").json()}
+    assert rows["citation_quality"]["cases_available"] == 0
+    assert "Retrieved context path" in rows["citation_quality"]["unavailable"]
+    assert rows["faithfulness"]["unavailable"] is None
+    with_sources = _create_target(client, config={"context_path": "sources", "theme": "general_support"})
+    rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={with_sources['id']}").json()}
+    assert rows["citation_quality"]["cases_available"] > 0 and rows["citation_quality"]["unavailable"] is None

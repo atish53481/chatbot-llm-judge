@@ -145,10 +145,19 @@ Each dashboard card's **Details** shows the latest run: the verdict ("Average 0.
 the last few run scores, and *What this measures* (description, scale, the fields
 the judge reads, the G-Eval rubric). Failed cases come first; **Failed only** hides
 the rest, and **Copy** puts one case on the clipboard as text.
+A failed card's Details also has **How to improve**: the judge's reasons for the
+worst failed cases, then what to change in the chatbot and what to check in the
+test (a failing score does not always mean the chatbot is wrong). The advice for
+every metric lives in `backend/metric_advice.py`.
+
+Citation Quality only applies to a chatbot that returns its own sources
+(*Retrieved context path* set): a chatbot that returns none could never cite the
+golden's reference documents, so the metric shows as not applicable instead of
+failing.
 
 **Download report (PDF)** in the dashboard header opens a printable report of the
 selected chatbot (cover with the average score, a summary table of every metric,
-each run metric's meaning, verdict and failed cases, and how to read the scores)
+an **Action plan** listing failed metrics furthest-from-passing first with the judge's reasons and how to improve each, each run metric's meaning, verdict and failed cases, and how to read the scores)
 and opens the print dialog: choose *Save as PDF*. Case details come from the runs
 this browser made; a metric run elsewhere shows its score without the cases.
 

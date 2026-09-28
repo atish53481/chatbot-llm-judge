@@ -383,6 +383,38 @@ function metricMeaning(metric) {
   return pairs;
 }
 
+// How far a failed run is from passing, on the metric's own scale.
+function gapText(direction, score, threshold) {
+  if (typeof score !== "number" || typeof threshold !== "number") return "";
+  const gap = Math.abs(score - threshold);
+  return `${formatScore(score)}, needs ${comparator(direction)} ${formatScore(threshold)} (gap ${formatScore(gap)})`;
+}
+
+// The judge's reasons from the worst failed cases: what actually went wrong.
+function worstReasons(rows, direction, count = 3) {
+  const failed = rows.filter((r) => !r.passed && r.reason);
+  failed.sort((a, b) => (direction === "lower" ? (b.score ?? 0) - (a.score ?? 0) : (a.score ?? 1) - (b.score ?? 1)));
+  return failed.slice(0, count).map((r) => ({ question: r.question || r.input || "", reason: r.reason }));
+}
+
+// "How to improve" for a failed metric: the judge's reasons, then what to
+// change in the chatbot and what to check in the test (metric_advice.py).
+function improvementBlock(metric, details) {
+  const advice = metric.improve || {};
+  const reasons = details ? worstReasons(details.rows || [], details.direction || metric.direction) : [];
+  const list = (items) => el("ul", {}, ...items.map((text) => el("li", {}, text)));
+  return el(
+    "div",
+    { className: "improve" },
+    reasons.length ? el("p", { className: "improve-label" }, "What the judge said") : null,
+    reasons.length ? el("ul", {}, ...reasons.map((r) => el("li", {}, el("i", {}, `“${r.question}”: `), r.reason))) : null,
+    advice.chatbot && advice.chatbot.length ? el("p", { className: "improve-label" }, "Fix the chatbot") : null,
+    advice.chatbot && advice.chatbot.length ? list(advice.chatbot) : null,
+    advice.tests && advice.tests.length ? el("p", { className: "improve-label" }, "Check the test") : null,
+    advice.tests && advice.tests.length ? list(advice.tests) : null,
+  );
+}
+
 // One case as plain text, for pasting into a bug report.
 function caseAsText(metric, row, direction, threshold) {
   const lines = [

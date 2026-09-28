@@ -336,6 +336,14 @@ function caseDetailPanel(metric, details) {
     el("p", { className: "muted small" }, `As of ${formatRunTime(details.finishedAt)} · each case scored ${comparator(direction)} ${formatScore(threshold)}`),
     runSummary(details),
     recentRuns(metric),
+    details.status === "fail"
+      ? el(
+        "details",
+        { className: "metric-improve", open: true },
+        el("summary", {}, "How to improve"),
+        improvementBlock(metric, details),
+      )
+      : null,
     el(
       "details",
       { className: "metric-meaning" },
@@ -542,7 +550,7 @@ function metricCard(metric, row) {
         { className: "card-meta" },
         cases
           ? `${cases} case${cases === 1 ? "" : "s"} available · ${metric.dataset}${metric.probe_set ? ` (${metric.probe_set})` : ""}`
-          : "no cases for this chatbot's golden set",
+          : metric.unavailable || "no cases for this chatbot's golden set",
       ),
       el("p", { className: "card-meta" }, hasRun ? formatRunTime(row.ts) : "–"),
     ),

@@ -733,11 +733,12 @@ armConfirm($("reset-target-runs"), async () => {
   }
 });
 
-function renderSkippedRow(line, title, theme) {
+function renderSkippedRow(line, title, theme, reason) {
   line.className = "run-row skipped";
   line.replaceChildren(
     el("span", { className: "run-row-title" }, title),
-    el("span", { className: "run-row-chip muted" }, `skipped: no cases in '${theme}'`),
+    el("span", { className: "run-row-chip muted", title: reason || "" },
+      reason ? "skipped: not applicable to this chatbot" : `skipped: no cases in '${theme}'`),
   );
 }
 
@@ -801,7 +802,8 @@ $("run-button").addEventListener("click", async () => {
   for (const key of keys.filter((k) => empty.has(k))) {
     lines.set(key, el("li"));
     $("run-results").append(lines.get(key));
-    renderSkippedRow(lines.get(key), titles.get(key) || key, themeOf(target));
+    const metric = state.metrics.find((m) => m.key === key);
+    renderSkippedRow(lines.get(key), titles.get(key) || key, themeOf(target), metric && metric.unavailable);
   }
   $("run-button").disabled = true;
   state.runControl = {};
@@ -902,7 +904,7 @@ async function renderThresholds() {
             hasNoCases(metric)
               ? el("small", {
                   className: "no-cases",
-                  title: `No cases for this metric in the golden set '${themeOf(currentTarget())}': a run skips it.`,
+                  title: metric.unavailable || `No cases for this metric in the golden set '${themeOf(currentTarget())}': a run skips it.`,
                 }, " · 0 cases")
               : null,
           ),

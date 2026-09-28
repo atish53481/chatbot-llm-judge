@@ -146,6 +146,16 @@ table.summary .num { text-align: right; white-space: nowrap; }
 
 .case-head { margin: 0 0 4px; font-weight: 600; }
 
+.plan-item {
+  margin: 10px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--fail);
+  break-inside: avoid;
+}
+
+.improve-label { margin: 6px 0 2px; font-weight: 600; color: var(--muted); }
+.improve ul { margin: 0; padding-left: 18px; }
+
 .metric { break-inside: avoid-page; }
 .page-break { break-before: page; }
 

@@ -15,7 +15,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from backend import storage, usage
-from backend.dashboard.runner import RunCancelled, judge_one, run_spec
+from backend.dashboard.runner import NEEDS_OWN_SOURCES, RunCancelled, judge_one, run_spec
 from backend.datasets import conversations as conversations_store
 from backend.datasets import goldens as goldens_store
 from backend.datasets import security_probes as probes_store
@@ -719,11 +719,17 @@ def api_list_metrics(target_id: int | None = None):
     copy, and how many cases each metric would run for the given target (its
     theme and persona)."""
     theme, persona, probe_set = DEFAULT_THEME, "", ""
+    own_sources = True  # without a target, count every metric's cases
     if target_id is not None:
         config = _target_or_404(target_id)["config"]
         theme = config.get("theme") or DEFAULT_THEME
         persona = config.get("persona", "")
         probe_set = config.get("probe_set", "")
+        own_sources = bool(config.get("context_path"))
+
+    def unavailable(s) -> str | None:
+        return NEEDS_OWN_SOURCES if s.needs_own_sources and not own_sources else None
+
     return [
         {
             "key": s.key,
@@ -745,9 +751,13 @@ def api_list_metrics(target_id: int | None = None):
             "scale_hint": s.scale_hint,
             "question": s.question,
             "dataset": s.dataset_name,
-            "cases_available": _cases_available(s, theme, persona, probe_set),
+            "cases_available": 0 if unavailable(s) else _cases_available(s, theme, persona, probe_set),
+            # Why this metric cannot run for this chatbot (None when it can).
+            "unavailable": unavailable(s),
             # Which security probe set this target sends (None for other datasets).
             "probe_set": (probe_set or "ecommerce") if s.dataset_name == "security_probes" else None,
+            # How to improve it when it fails: steps for the chatbot and for the test.
+            "improve": s.improve,
         }
         # Grouped the way both UIs show them: by dashboard category, in chip order.
         for s in sorted(ALL_SPECS, key=lambda spec: UI_CATEGORIES.index(spec.ui_category))

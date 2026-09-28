@@ -268,6 +268,10 @@ body.dash {
 .recent-runs .status-pass { color: var(--success-text); }
 .recent-runs .status-fail { color: var(--status-critical); }
 .metric-meaning { margin: 6px 0; }
+.metric-improve { margin: 6px 0; padding: 6px 8px; border-left: 3px solid var(--status-critical); }
+.metric-improve summary { cursor: pointer; font-weight: 600; }
+.improve-label { margin: 6px 0 2px; font-weight: 600; color: var(--text-secondary); }
+.improve ul { margin: 0; padding-left: 18px; }
 .metric-meaning summary { cursor: pointer; font-weight: 600; }
 .case-filter { margin: 8px 0; }
 .case-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

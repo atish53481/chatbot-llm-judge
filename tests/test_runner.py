@@ -465,3 +465,16 @@ def test_skipped_cases_are_saved_with_the_run(tmp_path):
     result = run_spec(spec, judge=object(), target=_LimitedBot(20), target_id=target_id, conn=conn)
     assert result["cases_skipped"] == 1
     assert storage.history(conn, target_id, "fake_metric")[0]["cases_skipped"] == 1
+
+
+def test_citation_metric_needs_the_chatbots_own_sources(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("q")], _fake_metric([0.9], [True]))
+    spec.needs_own_sources = True
+    # A chatbot that returns no sources cannot cite the golden's reference documents.
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert result["status"] == "error" and "Retrieved context path" in result["error"]
+    assert storage.history(conn, target_id, "fake_metric") == []
+    target = CannedChatbot()
+    target.context_path = "sources"
+    assert run_spec(spec, judge=object(), target=target, target_id=target_id, conn=conn)["status"] == "pass"

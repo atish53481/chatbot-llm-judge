@@ -32,6 +32,7 @@ from deepeval.test_case import ConversationalTestCase, LLMTestCase, SingleTurnPa
 from backend.datasets.conversations import load_conversations
 from backend.datasets.goldens import load_goldens
 from backend.datasets.security_probes import DEFAULT_PROBE_SET, PROBE_SETS, load_probes
+from backend.metric_advice import ADVICE
 
 DEFAULT_THEME = "generic"
 PASS_THRESHOLD = 0.7  # default for "higher" metrics without their own
@@ -143,6 +144,13 @@ class MetricSpec:
     ui_category: str = ""
     scale_hint: str = ""
     question: str = ""
+    # Scores the chatbot's attribution to its own sources: a chatbot that returns
+    # none (no context_path) could never cite the golden's reference documents,
+    # so the metric does not apply to it instead of failing.
+    needs_own_sources: bool = False
+    # How to improve the metric when it fails (backend/metric_advice.py):
+    # {"chatbot": [steps], "tests": [steps]}.
+    improve: dict = field(default_factory=dict)
 
     @property
     def category(self) -> str:
@@ -427,6 +435,7 @@ SPEC_CITATION_QUALITY = MetricSpec(
         threshold, judge),
     build_case=lambda g, reply, retrieval=None: _case(g, reply, retrieval_context=_ctx(g, retrieval)),
     needs=("context",),
+    needs_own_sources=True,
 )
 
 SPEC_HELPFULNESS = MetricSpec(
@@ -563,4 +572,6 @@ for _spec in _BASE_SPECS:
     _spec.ui_category, _spec.scale_hint, _spec.question = _CARD_COPY[_spec.key]
 
 ALL_SPECS: list[MetricSpec] = _BASE_SPECS + SECURITY_SPECS
+for _spec in ALL_SPECS:
+    _spec.improve = ADVICE[_spec.key]
 SPECS_BY_KEY: dict[str, MetricSpec] = {s.key: s for s in ALL_SPECS}

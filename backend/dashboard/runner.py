@@ -56,6 +56,12 @@ def _context_used(spec, item: dict, retrieval: list[str] | None) -> tuple[list[s
     return None, None
 
 
+NEEDS_OWN_SOURCES = (
+    "Not applicable: this metric scores how the chatbot cites its own sources, and this "
+    "chatbot returns none. Set 'Retrieved context path' on a chatbot whose responses list "
+    "the documents it used."
+)
+
 GOLDEN_CONTEXT_NOTE = (
     "The chatbot's responses carry no retrieved context, so the retrieval context "
     "scored here is each golden's reference context. It checks the reference data, "
@@ -112,6 +118,8 @@ def run_spec(
     usage_before, started = usage.snapshot(), time.monotonic()
     report = on_progress or (lambda *_args: None)
     kind = getattr(spec, "kind", "single")
+    if getattr(spec, "needs_own_sources", False) and not getattr(target, "context_path", ""):
+        return _error(spec, theme, NEEDS_OWN_SOURCES, cases_total=0)
     try:
         items = spec.cases(theme=theme, persona=persona, probe_set=probe_set)
     except Exception as e:  # noqa: BLE001 - a broken dataset is a run error, not a crash
