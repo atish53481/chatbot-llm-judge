@@ -12,6 +12,7 @@ import sqlite3
 
 from backend import storage
 from backend.metrics_catalog import DEFAULT_THEME
+from backend.targets.http_client import MessageTooLong
 
 
 class RunCancelled(Exception):
@@ -114,29 +115,39 @@ def run_spec(
     available = len(items)
     if limit:
         items = items[:limit]
+    # The chatbot's max message length: prompts that can shrink (Summarization's
+    # source) are cut to it, and cases still too long are skipped, not sent.
+    max_len = getattr(target, "max_message_length", None)
+    if max_len and kind != "conversation":
+        items = [{**item, "max_chars": max_len} for item in items]
 
     pass_mark = _threshold(spec, threshold)
     prompt = getattr(spec, "prompt", None)
-    rows = []
+    rows, scored, skipped = [], [], 0
     try:
         metric = spec.build_metric(judge, _deepeval_threshold(spec, pass_mark))
         for done, item in enumerate(items):
-            if kind == "conversation":
-                case, turns = _run_conversation(spec, target, item, report, done, len(items))
-                question, reply = item.get("name", "conversation"), _transcript(turns)
-                sent = "\n".join(item.get("user_turns", []))
-                expected, used, source = item.get("expected_outcome", ""), None, None
-            else:
-                question = item["question"]
-                report(done, len(items), "chat", question)
-                sent = prompt(item) if callable(prompt) else question
-                answer = target.chat(sent)
-                reply = answer.reply
-                retrieval = getattr(answer, "retrieval_context", None)
-                used, source = _context_used(spec, item, retrieval)
-                expected = item.get("expected_answer", "")
-                # The catalog's builders fall back to the golden's context themselves.
-                case = spec.build_case(item, reply, retrieval)
+            try:
+                if kind == "conversation":
+                    case, turns = _run_conversation(spec, target, item, report, done, len(items))
+                    question, reply = item.get("name", "conversation"), _transcript(turns)
+                    sent = "\n".join(item.get("user_turns", []))
+                    expected, used, source = item.get("expected_outcome", ""), None, None
+                else:
+                    question = item["question"]
+                    report(done, len(items), "chat", question)
+                    sent = prompt(item) if callable(prompt) else question
+                    answer = target.chat(sent)
+                    reply = answer.reply
+                    retrieval = getattr(answer, "retrieval_context", None)
+                    used, source = _context_used(spec, item, retrieval)
+                    expected = item.get("expected_answer", "")
+                    # The catalog's builders fall back to the golden's context themselves.
+                    case = spec.build_case(item, reply, retrieval)
+            except MessageTooLong:
+                skipped += 1
+                continue
+            scored.append(item)
             report(done, len(items), "judge", question)
             metric.measure(case)
             rows.append({
@@ -161,6 +172,14 @@ def run_spec(
         }
     except Exception as e:  # noqa: BLE001 - surface any target/judge failure to the caller
         return _error(spec, theme, f"{type(e).__name__}: {e}", cases_total=len(items))
+    if not rows:
+        return _error(
+            spec, theme,
+            f"All {skipped} cases are longer than this chatbot's max message length "
+            f"({max_len} characters), so nothing was sent. Raise the limit if the chatbot "
+            "accepts longer messages.",
+            cases_total=len(items),
+        )
 
     scores = [r["score"] for r in rows if r["score"] is not None]
     avg = sum(scores) / len(scores) if scores else None
@@ -180,8 +199,17 @@ def run_spec(
         "cases_run": len(rows),
         "cases_total": available,
         "error": None,
-        "note": _golden_context_note(spec, rows) or _case_note(spec, items[:len(rows)]),
+        "note": _join_notes(
+            _golden_context_note(spec, rows),
+            _case_note(spec, scored),
+            f"Skipped {skipped} of {len(items)} cases longer than this chatbot's max message "
+            f"length ({max_len} characters)." if skipped else None,
+        ),
     }
+
+
+def _join_notes(*notes: str | None) -> str | None:
+    return " ".join(n for n in notes if n) or None
 
 
 def _golden_context_note(spec, rows: list[dict]) -> str | None:

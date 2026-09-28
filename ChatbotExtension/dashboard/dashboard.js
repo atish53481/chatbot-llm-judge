@@ -558,7 +558,8 @@ async function runKeys(keys) {
         if (result.status === "cancelled") {
           setStatus(`${title}: ${result.error} (not saved)`);
         } else {
-          const unreachable = result.status === "error" && /HTTP|Connection|Timeout/i.test(result.error || "");
+          const unreachable = result.status === "error"
+            && /HTTP|Connection|Timeout|Could not reach|did not answer|service message|empty reply|is busy/i.test(result.error || "");
           state.chatbotHealth = unreachable ? "bad" : result.status === "error" ? state.chatbotHealth : "good";
           refreshExpandedDetail(key, result);
           if (result.status === "error") setStatus(`${title}: ${result.error}`, true);

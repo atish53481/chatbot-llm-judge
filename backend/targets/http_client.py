@@ -12,14 +12,16 @@ is given.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, urlsplit
 
 import requests
 
 from backend import usage
 from backend.targets.base import ChatbotClient, ChatReply
 from backend.targets.curl import MESSAGE_PLACEHOLDER, context_texts, find_history_path
+from backend.targets.reply_check import ChatbotUnavailable, service_message
 
 TIMEOUT = 60
 METHODS = ("GET", "POST", "PUT", "PATCH")
@@ -27,6 +29,43 @@ _TEXT_KEYS = ("url", "method", "body_template", "response_path", "context_path",
 # Headers from the captured request that would be wrong for a new body.
 _DROPPED_HEADERS = ("content-length", "host", "accept-encoding")
 _PREVIEW_CHARS = 400
+# A busy chatbot (429/503) is retried this many times, waiting its Retry-After
+# (capped) or else 2, 4, 8 seconds.
+BUSY_STATUSES = (429, 503)
+BUSY_RETRIES = 3
+MAX_RETRY_WAIT = 30.0
+MAX_SEND_DELAY = 60
+# Patched in tests so retries and spacing cost no real time.
+_sleep = time.sleep
+_clock = time.monotonic
+
+
+class MessageTooLong(ValueError):
+    """The message is over the chatbot's max_message_length, so it was not sent."""
+
+
+def _retry_wait(r: requests.Response, attempt: int) -> float:
+    try:
+        return min(float(r.headers.get("Retry-After", "")), MAX_RETRY_WAIT)
+    except ValueError:
+        return float(2 ** (attempt + 1))  # no (or a date-valued) Retry-After
+
+
+def _status_error(r: requests.Response, url: str) -> ValueError:
+    host = urlsplit(url).netloc
+    if r.status_code in (401, 403):
+        return ValueError(
+            f"Chatbot rejected the request (HTTP {r.status_code} from {host}): its session or "
+            "cookie has probably expired. Copy a fresh cURL from the chatbot's site and edit "
+            f"the chatbot. Response: {_preview(r.text)}"
+        )
+    if r.status_code in BUSY_STATUSES:
+        return ValueError(
+            f"Chatbot is busy (HTTP {r.status_code} from {host}) and still was after "
+            f"{BUSY_RETRIES} retries. Try again later, or set a delay between messages. "
+            f"Response: {_preview(r.text)}"
+        )
+    return ValueError(f"HTTP {r.status_code} from {url}: {_preview(r.text)}")
 
 
 def _get_path(obj: Any, dotted: str) -> Any:
@@ -92,6 +131,19 @@ class HttpTargetClient(ChatbotClient):
             )
         if method == "GET" and body_template:
             raise ValueError("a GET request has no body; put the placeholder in the URL")
+        max_length = config.get("max_message_length")
+        if max_length is not None and (
+            isinstance(max_length, bool) or not isinstance(max_length, int) or max_length < 1
+        ):
+            raise ValueError("max_message_length must be a whole number of characters above 0")
+        send_delay = config.get("send_delay") or 0
+        if isinstance(send_delay, bool) or not isinstance(send_delay, (int, float)) or not (
+            0 <= send_delay <= MAX_SEND_DELAY
+        ):
+            raise ValueError(f"send_delay must be between 0 and {MAX_SEND_DELAY} seconds")
+        check_replies = config.get("check_replies", True)
+        if not isinstance(check_replies, bool):
+            raise ValueError("check_replies must be true or false")
 
         self.url = url
         self.method = method
@@ -103,6 +155,13 @@ class HttpTargetClient(ChatbotClient):
         # Where the body carries earlier turns (multi-turn metrics). Older configs
         # have none saved, so it is read from the body ("history": [], "messages").
         self.history_path = config.get("history_path") or find_history_path(body_template)
+        # Longest message the chatbot accepts (None = no limit); longer ones are not sent.
+        self.max_message_length = max_length
+        # Seconds to leave between two messages, for chatbots that rate-limit.
+        self.send_delay = float(send_delay)
+        # Treat service messages ("limit reached", "please log in") as errors.
+        self.check_replies = check_replies
+        self._last_sent: float | None = None
 
     def _encode_for_body(self, message: str) -> str:
         content_type = next(
@@ -117,7 +176,16 @@ class HttpTargetClient(ChatbotClient):
     def chat(self, message: str, history: list[dict] | None = None) -> ChatReply:
         # Golden questions are asked on their own (no history); multi-turn
         # scenarios pass the conversation so far, which goes into history_path.
-        return self.read_reply(self.send(message, history))
+        reply = self.read_reply(self.send(message, history))
+        if self.check_replies:
+            problem = service_message(reply.reply)
+            if problem:
+                raise ChatbotUnavailable(
+                    f"{problem[0].upper()}{problem[1:]} instead of an answer, so nothing was "
+                    f"scored: {_preview(reply.reply)!r}. If this is a real answer, turn off "
+                    "'Treat service messages as errors' for this chatbot."
+                )
+        return reply
 
     def _with_history(self, body: str, history: list[dict]) -> str:
         """Puts earlier turns ({role, content}) where the captured body keeps them."""
@@ -139,6 +207,11 @@ class HttpTargetClient(ChatbotClient):
 
     def send(self, message: str, history: list[dict] | None = None) -> requests.Response:
         """Sends one question; raises ValueError on an HTTP error status."""
+        if self.max_message_length and len(message) > self.max_message_length:
+            raise MessageTooLong(
+                f"message is {len(message)} characters; this chatbot's max message length "
+                f"is {self.max_message_length}"
+            )
         url = self.url.replace(MESSAGE_PLACEHOLDER, quote(message, safe=""))
         body = None
         if self.body_template:
@@ -149,10 +222,36 @@ class HttpTargetClient(ChatbotClient):
         headers = {
             k: v for k, v in self.headers.items() if k.lower() not in _DROPPED_HEADERS
         }
-        r = requests.request(self.method, url, data=body, headers=headers, timeout=TIMEOUT)
-        usage.record_target()
+        for attempt in range(BUSY_RETRIES + 1):
+            self._wait_for_send_delay()
+            r = self._request(url, body, headers)
+            if r.status_code not in BUSY_STATUSES or attempt == BUSY_RETRIES:
+                break
+            _sleep(_retry_wait(r, attempt))
         if not r.ok:
-            raise ValueError(f"HTTP {r.status_code} from {url}: {_preview(r.text)}")
+            raise _status_error(r, url)
+        return r
+
+    def _wait_for_send_delay(self) -> None:
+        if self.send_delay and self._last_sent is not None:
+            wait = self.send_delay - (_clock() - self._last_sent)
+            if wait > 0:
+                _sleep(wait)
+
+    def _request(self, url: str, body: bytes | None, headers: dict) -> requests.Response:
+        host = urlsplit(url).netloc
+        try:
+            r = requests.request(self.method, url, data=body, headers=headers, timeout=TIMEOUT)
+        except requests.Timeout as e:
+            raise ValueError(f"Chatbot at {host} did not answer within {TIMEOUT} s.") from e
+        except requests.ConnectionError as e:
+            raise ValueError(
+                f"Could not reach the chatbot at {host}: check the URL and that the site is up. ({e})"
+            ) from e
+        finally:
+            if self.send_delay:
+                self._last_sent = _clock()
+        usage.record_target()
         return r
 
     def read_reply(self, r: requests.Response) -> ChatReply:

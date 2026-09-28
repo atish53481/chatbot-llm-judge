@@ -125,6 +125,9 @@ function startEditTarget(target) {
   $("target-persona").value = config.persona || "";
   $("target-probe-set").value = config.probe_set || "ecommerce";
   $("target-history-path").value = config.history_path || "";
+  $("target-max-length").value = config.max_message_length ?? "";
+  $("target-send-delay").value = config.send_delay || "";
+  $("target-check-replies").checked = config.check_replies !== false;
   $("target-theme-input").value = themeOf(target);
   $("curl-import").open = false;
   $("curl-status").textContent = "";
@@ -296,7 +299,17 @@ function buildTargetConfig() {
     probe_set: $("target-probe-set").value,
     history_path: value("target-history-path"),
     theme: value("target-theme-input") || DEFAULT_THEME,
+    max_message_length: value("target-max-length") ? Number(value("target-max-length")) : null,
+    send_delay: value("target-send-delay") ? Number(value("target-send-delay")) : 0,
+    check_replies: $("target-check-replies").checked,
   };
+  if (config.max_message_length !== null
+      && (!Number.isInteger(config.max_message_length) || config.max_message_length < 1)) {
+    throw new Error("Max message length must be a whole number above 0.");
+  }
+  if (!Number.isFinite(config.send_delay) || config.send_delay < 0 || config.send_delay > 60) {
+    throw new Error("Delay between messages must be between 0 and 60 seconds.");
+  }
   if (!config.url) throw new Error("URL is required.");
   if (!`${config.url}${config.body_template}`.includes("{{message}}")) {
     throw new Error("Put {{message}} in the body (or URL) where the question goes.");

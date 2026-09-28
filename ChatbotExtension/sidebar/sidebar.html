@@ -104,6 +104,19 @@
         <label>Chatbot role (optional, for Security metrics)
           <input id="target-persona" maxlength="300" placeholder="e.g. ShopEasy e-commerce support bot" title="What the chatbot is meant to be. Domain Misuse, Non-Advice and Role Violation are judged against it; empty = the role the bot claims for itself.">
         </label>
+        <details class="target-limits">
+          <summary>Limits and reply checks</summary>
+          <label>Max message length (characters, optional)
+            <input id="target-max-length" type="number" min="1" step="1" placeholder="no limit" title="The longest message this chatbot accepts. Longer test messages are shortened where they can be (Summarization) and otherwise skipped, instead of failing the run.">
+          </label>
+          <label>Delay between messages (seconds)
+            <input id="target-send-delay" type="number" min="0" max="60" step="0.5" placeholder="0" title="Wait this long between two messages, for chatbots that rate-limit. Busy replies (HTTP 429/503) are retried either way.">
+          </label>
+          <label class="row">
+            <input id="target-check-replies" type="checkbox" checked>
+            <span title="A reply like 'daily limit reached' or 'please log in' stops the run as an error instead of being scored. Turn off only if this chatbot's real answers look like that.">Treat service messages as errors</span>
+          </label>
+        </details>
         <input id="target-history-path" type="hidden">
         <label>Golden set (theme)
           <input id="target-theme-input" value="generic" required pattern="[A-Za-z0-9_\-]+" title="Letters, digits, _ and -">

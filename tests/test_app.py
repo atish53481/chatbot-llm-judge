@@ -785,3 +785,14 @@ def test_document_from_url_reports_unusable_pages(app_module, client, monkeypatc
 def test_document_from_url_rejects_unsafe_theme(client):
     r = client.post("/api/documents/url", json={"theme": "../evil", "url": "https://help.example"})
     assert r.status_code == 422
+
+
+def test_target_keeps_its_limits_and_rejects_bad_ones(client):
+    created = _create_target(client, config={
+        "max_message_length": 2000, "send_delay": 1.5, "check_replies": False})
+    stored = client.get("/api/targets").json()
+    config = next(t for t in stored if t["id"] == created["id"])["config"]
+    assert (config["max_message_length"], config["send_delay"], config["check_replies"]) == (2000, 1.5, False)
+    r = client.post("/api/targets", json={"name": "x", "type": "http",
+                                          "config": {**BOT_CONFIG, "max_message_length": -5}})
+    assert r.status_code == 400 and "max_message_length" in r.text

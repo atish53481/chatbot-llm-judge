@@ -343,3 +343,53 @@ def test_empty_dataset_error_says_what_is_missing(tmp_path, dataset, kind, hint)
                       conn=conn, theme="generic")
     assert result["status"] == "error" and result["cases_total"] == 0
     assert hint in result["error"] and "'generic'" in result["error"]
+
+
+class _LimitedBot(CannedChatbot):
+    """Canned bot that, like a real one, refuses messages over its limit."""
+    def __init__(self, limit):
+        super().__init__()
+        self.max_message_length = limit
+
+    def chat(self, message, history=None):
+        from backend.targets.http_client import MessageTooLong
+        if len(message) > self.max_message_length:
+            raise MessageTooLong(f"message is {len(message)} characters; limit {self.max_message_length}")
+        return super().chat(message, history)
+
+
+def test_cases_over_the_chatbots_limit_are_skipped_and_noted(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("short?"), _case("x" * 50)], _fake_metric([0.9], [True]))
+    result = run_spec(spec, judge=object(), target=_LimitedBot(20), target_id=target_id, conn=conn)
+    assert result["status"] == "pass" and result["cases_run"] == 1
+    assert "Skipped 1 of 2 cases" in result["note"] and "20" in result["note"]
+
+
+def test_every_case_over_the_limit_is_an_error(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("x" * 50)], _fake_metric([], []))
+    result = run_spec(spec, judge=object(), target=_LimitedBot(20), target_id=target_id, conn=conn)
+    assert result["status"] == "error" and "max message length" in result["error"]
+    assert storage.history(conn, target_id, "fake_metric") == []
+
+
+def test_service_message_stops_the_run_and_records_nothing(tmp_path):
+    from backend.targets.reply_check import ChatbotUnavailable
+    conn, target_id = _db(tmp_path)
+    target = MagicMock()
+    target.chat.side_effect = ChatbotUnavailable("Chatbot replied with a service message: 'limit reached'")
+    spec = _fake_spec([_case("q1"), _case("q2")], _fake_metric([0.9, 0.9], [True, True]))
+    result = run_spec(spec, judge=object(), target=target, target_id=target_id, conn=conn)
+    assert result["status"] == "error" and "service message" in result["error"]
+    assert target.chat.call_count == 1
+    assert storage.history(conn, target_id, "fake_metric") == []
+
+
+def test_summarization_source_is_cut_to_the_chatbots_limit(tmp_path):
+    from backend.metrics_catalog import SPECS_BY_KEY
+    spec = SPECS_BY_KEY["summarization"]
+    item = {"question": "q", "expected_answer": "a", "context": ["word " * 400], "max_chars": 300}
+    assert len(spec.prompt(item)) <= 300
+    assert spec.build_case(item, "r").input in spec.prompt(item)
+    assert spec.case_note(item)

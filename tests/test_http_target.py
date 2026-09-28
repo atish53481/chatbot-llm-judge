@@ -151,3 +151,94 @@ def test_send_counts_a_target_call(mock_request):
     HttpTargetClient(_config()).chat("hi")
     assert usage.snapshot()["target_calls"] == 1
     usage.reset()
+
+
+# --- Stage 1: non-answers, message length, busy chatbots, clear errors --------
+
+@patch("backend.targets.http_client.requests.request")
+def test_service_message_reply_is_an_error_not_an_answer(mock_request):
+    from backend.targets.reply_check import ChatbotUnavailable
+    mock_request.return_value = _response('{"data": {"text": "You have reached your daily message limit."}}')
+    with pytest.raises(ChatbotUnavailable, match="service message"):
+        HttpTargetClient(_config()).chat("hi")
+    # A chatbot whose real answers look like that can switch the check off.
+    reply = HttpTargetClient(_config(check_replies=False)).chat("hi")
+    assert reply.reply == "You have reached your daily message limit."
+
+
+@patch("backend.targets.http_client.requests.request")
+def test_message_over_the_chatbots_limit_is_not_sent(mock_request):
+    from backend.targets.http_client import MessageTooLong
+    client = HttpTargetClient(_config(max_message_length=10))
+    with pytest.raises(MessageTooLong, match="10"):
+        client.chat("x" * 11)
+    mock_request.assert_not_called()
+
+
+@patch("backend.targets.http_client._sleep")
+@patch("backend.targets.http_client.requests.request")
+def test_busy_chatbot_is_retried_after_its_retry_after(mock_request, mock_sleep):
+    busy = _response("slow down", status=429)
+    busy.headers["Retry-After"] = "3"
+    mock_request.side_effect = [busy, _response('{"data": {"text": "ok"}}')]
+    assert HttpTargetClient(_config()).chat("hi").reply == "ok"
+    assert mock_request.call_count == 2
+    mock_sleep.assert_called_once_with(3.0)
+
+
+@patch("backend.targets.http_client._sleep")
+@patch("backend.targets.http_client.requests.request")
+def test_busy_chatbot_gives_up_after_three_retries(mock_request, mock_sleep):
+    mock_request.return_value = _response("unavailable", status=503)
+    with pytest.raises(ValueError, match="busy"):
+        HttpTargetClient(_config()).chat("hi")
+    assert mock_request.call_count == 4
+    assert [c.args[0] for c in mock_sleep.call_args_list] == [2.0, 4.0, 8.0]
+
+
+@patch("backend.targets.http_client.requests.request")
+def test_rejected_request_says_to_refresh_the_curl(mock_request):
+    mock_request.return_value = _response("forbidden", status=403)
+    with pytest.raises(ValueError, match="fresh cURL"):
+        HttpTargetClient(_config()).chat("hi")
+
+
+@patch("backend.targets.http_client.requests.request")
+def test_timeout_and_unreachable_chatbot_have_plain_messages(mock_request):
+    import requests
+    mock_request.side_effect = requests.Timeout("read timed out")
+    with pytest.raises(ValueError, match="did not answer within"):
+        HttpTargetClient(_config()).chat("hi")
+    mock_request.side_effect = requests.ConnectionError("refused")
+    with pytest.raises(ValueError, match="Could not reach the chatbot"):
+        HttpTargetClient(_config()).chat("hi")
+
+
+@patch("backend.targets.http_client._clock")
+@patch("backend.targets.http_client._sleep")
+@patch("backend.targets.http_client.requests.request")
+def test_send_delay_spaces_out_messages(mock_request, mock_sleep, mock_clock):
+    mock_request.return_value = _response('{"data": {"text": "ok"}}')
+    # Sent at 100.0; the second message is ready at 100.5, so it waits 1.5 s.
+    mock_clock.side_effect = [100.0, 100.5, 102.0]
+    client = HttpTargetClient(_config(send_delay=2))
+    client.chat("one")
+    client.chat("two")
+    mock_sleep.assert_called_once_with(1.5)
+
+
+@pytest.mark.parametrize("overrides, error", [
+    ({"max_message_length": 0}, "max_message_length"),
+    ({"max_message_length": "500"}, "max_message_length"),
+    ({"send_delay": -1}, "send_delay"),
+    ({"send_delay": 120}, "send_delay"),
+    ({"check_replies": "yes"}, "check_replies"),
+])
+def test_stage_one_settings_are_validated(overrides, error):
+    with pytest.raises(ValueError, match=error):
+        HttpTargetClient(_config(**overrides))
+
+
+def test_stage_one_settings_are_optional():
+    client = HttpTargetClient(_config(max_message_length=None, send_delay=None))
+    assert client.max_message_length is None and client.send_delay == 0 and client.check_replies

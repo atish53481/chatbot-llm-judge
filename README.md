@@ -107,6 +107,24 @@ A **Run judge** sweep asks every golden question and scores the answers. To judg
 single answer instead, chat with the chatbot in the dashboard and press **Judge this
 answer** on its reply — ad-hoc scores are not saved, so they never enter the trend.
 
+## Chatbot limits and reply checks
+
+Each chatbot's form has **Limits and reply checks**, so one run cannot quietly
+record scores that mean nothing:
+
+- **Service messages are errors, not answers.** A short reply such as "daily limit
+  reached", "please log in", "session expired" or an empty reply stops the run with
+  an error and records nothing. Untick *Treat service messages as errors* only if
+  the chatbot's real answers look like that.
+- **Max message length.** Messages longer than this are not sent: Summarization
+  shortens its source to fit, other cases are skipped, and the result's note says
+  how many.
+- **Busy chatbots.** HTTP 429/503 replies are retried up to 3 times (after the
+  chatbot's `Retry-After`, else 2, 4, 8 s). *Delay between messages* spaces out
+  every message for chatbots that rate-limit.
+- **Plain errors.** An HTTP 401/403 says the session or cookie has probably expired
+  (paste a fresh cURL); timeouts and unreachable hosts say so.
+
 ## Golden answers
 
 Each chatbot is judged against one golden set (theme). `generic`, the default, fits
