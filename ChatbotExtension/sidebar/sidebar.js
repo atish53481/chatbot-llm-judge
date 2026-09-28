@@ -732,6 +732,13 @@ $("run-button").addEventListener("click", async () => {
   const titles = new Map(state.metrics.map((m) => [m.key, m.title]));
   const lines = new Map();
   $("run-results").replaceChildren();
+  // Metrics with no cases for this chatbot are listed as skipped, not sent.
+  const empty = new Set(state.metrics.filter(hasNoCases).map((m) => m.key));
+  for (const key of keys.filter((k) => empty.has(k))) {
+    lines.set(key, el("li"));
+    $("run-results").append(lines.get(key));
+    renderSkippedRow(lines.get(key), titles.get(key) || key, themeOf(target));
+  }
   $("run-button").disabled = true;
   state.runControl = {};
   $("stop-button").disabled = false;
@@ -782,13 +789,6 @@ async function renderThresholds() {
   const saved = await settings.get("checkedMetrics", null);
   $("check-consistency").checked = await settings.get("checkConsistency", false);
   const known = new Set(state.metrics.map((m) => m.key));
-  // Metrics with no cases for this chatbot are listed as skipped, not sent.
-  const empty = new Set(state.metrics.filter(hasNoCases).map((m) => m.key));
-  for (const key of keys.filter((k) => empty.has(k))) {
-    lines.set(key, el("li"));
-    $("run-results").append(lines.get(key));
-    renderSkippedRow(lines.get(key), titles.get(key) || key, themeOf(target));
-  }
   state.checked = new Set((saved ?? [...known]).filter((key) => known.has(key)));
   $("metric-check-count").textContent = `(${state.checked.size} of ${state.metrics.length} ticked)`;
   updateRunButton();

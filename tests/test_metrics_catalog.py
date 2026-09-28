@@ -226,7 +226,7 @@ def test_summarization_shortens_long_sources_to_fit_chatbot_limits():
     long_item = {"question": "q", "expected_answer": "a",
                  "context": [f"Fact number {i} about the refund policy." for i in range(300)]}
     prompt = spec.prompt(long_item)
-    # Chatbots cap message length (aleeup: 2,000 characters).
+    # Chatbots cap message length; 2,000 characters is common.
     assert len(prompt) <= 2000
     assert prompt.endswith("…")
     # The judge scores against the same shortened text the chatbot was sent.
@@ -273,5 +273,5 @@ def test_context_metrics_have_cases_on_generic_that_fit_chatbot_limits():
         spec = SPECS_BY_KEY[key]
         cases = [g for g in generic if g["context"]] if spec.dataset_name == "goldens_with_context" else generic
         assert cases, key
-        # aleeup.com, for one, rejects messages over 2,000 characters.
+        # Many chatbots reject messages over 2,000 characters.
         assert all(len(spec.prompt(g)) <= 2000 for g in cases), key
