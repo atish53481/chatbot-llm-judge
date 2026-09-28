@@ -42,10 +42,10 @@ def test_faithfulness_spec_requires_context():
     assert case.retrieval_context == ["ctx line"]
 
 
-def test_expected_dataset_defaults_to_general_support_theme():
+def test_expected_dataset_defaults_to_generic_theme():
     spec = SPECS_BY_KEY["answer_relevancy"]
     cases = spec.cases()
-    assert all(g["theme"] == "general_support" for g in cases)
+    assert all(g["theme"] == "generic" for g in cases)
     assert len(cases) >= 1
 
 
@@ -166,7 +166,8 @@ def test_every_metric_has_a_preset_per_environment():
 
 
 def test_conversation_and_probe_datasets_load():
-    assert len(SPECS_BY_KEY["knowledge_retention"].cases()) >= 3
+    assert len(SPECS_BY_KEY["knowledge_retention"].cases()) >= 2
+    assert len(SPECS_BY_KEY["knowledge_retention"].cases(theme="general_support")) >= 3
     assert all(c["user_turns"] for c in SPECS_BY_KEY["conversation_completeness"].cases())
     assert len(SPECS_BY_KEY["no_prompt_leak"].cases()) == 5
 
@@ -235,3 +236,42 @@ def test_summarization_shortens_long_sources_to_fit_chatbot_limits():
     short_item = {**long_item, "context": ["One fact.", "Another fact."]}
     assert spec.prompt(short_item).endswith("One fact.\nAnother fact.")
     assert spec.case_note(short_item) is None
+
+
+def test_shipped_generic_theme_fits_any_chatbot():
+    from backend.datasets import conversations
+    with open(goldens.DEFAULT_GOLDENS_PATH, encoding="utf-8") as f:
+        generic = [g for g in json.load(f) if g["theme"] == "generic"]
+    assert len(generic) >= 8
+    for g in generic:
+        assert g["question"].strip() and g["expected_answer"].strip()
+        # No bot's own facts: a golden either expects a behaviour (no context) or
+        # carries its facts in the message it sends (grounded).
+        assert bool(g["context"]) == bool(g.get("context_in_prompt"))
+    assert sum(1 for g in generic if g["context"]) >= 4
+    with open(conversations.DEFAULT_CONVERSATIONS_PATH, encoding="utf-8") as f:
+        scenarios = [c for c in json.load(f) if c["theme"] == "generic"]
+    assert len(scenarios) >= 2
+    assert all(len(c["user_turns"]) >= 2 for c in scenarios)
+
+
+def test_grounded_goldens_send_their_facts_with_the_question():
+    grounded = {"question": "When does it open?", "expected_answer": "6 am",
+                "context": ["Opens at 6 am.", "Closes at 10 pm."], "context_in_prompt": True}
+    plain = {"question": "Who are you?", "expected_answer": "An AI.", "context": []}
+    for key in ("faithfulness", "hallucination", "answer_relevancy", "correctness"):
+        prompt = SPECS_BY_KEY[key].prompt(grounded)
+        assert "Opens at 6 am.\nCloses at 10 pm." in prompt and prompt.endswith("When does it open?")
+        assert SPECS_BY_KEY[key].prompt(plain) == "Who are you?"
+
+
+def test_context_metrics_have_cases_on_generic_that_fit_chatbot_limits():
+    with open(goldens.DEFAULT_GOLDENS_PATH, encoding="utf-8") as f:
+        generic = [g for g in json.load(f) if g["theme"] == "generic"]
+    for key in ("faithfulness", "hallucination", "summarization", "contextual_precision",
+                "contextual_recall", "contextual_relevancy", "citation_quality"):
+        spec = SPECS_BY_KEY[key]
+        cases = [g for g in generic if g["context"]] if spec.dataset_name == "goldens_with_context" else generic
+        assert cases, key
+        # aleeup.com, for one, rejects messages over 2,000 characters.
+        assert all(len(spec.prompt(g)) <= 2000 for g in cases), key

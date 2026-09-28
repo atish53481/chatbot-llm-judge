@@ -289,6 +289,15 @@ summary {
   margin-top: 8px;
 }
 
+.threshold-row .no-cases {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.run-row.skipped .run-row-title {
+  color: var(--text-secondary);
+}
+
 .threshold-row .direction {
   color: var(--text-secondary);
   font-weight: 600;

@@ -52,8 +52,16 @@ async function refreshStatus() {
 }
 
 async function loadMetrics() {
-  state.metrics = await api("/api/metrics");
+  // Case counts depend on the chatbot's golden set, so ask about the selected one.
+  const target = currentTarget();
+  state.metrics = await api(target ? `/api/metrics?target_id=${target.id}` : "/api/metrics");
   await renderThresholds();
+}
+
+// A metric with nothing to send for this chatbot's golden set (e.g. the context
+// metrics on the generic set). The run skips it instead of reporting an error.
+function hasNoCases(metric) {
+  return metric.cases_available === 0;
 }
 
 async function loadTargets(preferredId) {
@@ -86,7 +94,7 @@ async function onTargetChanged() {
   resetTargetForm();
   updateRunButton();
   resetConversationForm();
-  await Promise.all([loadGoldens(), loadConversations(), renderLatest(), loadDocuments()]);
+  await Promise.all([loadMetrics(), loadGoldens(), loadConversations(), renderLatest(), loadDocuments()]);
 }
 
 // The target form doubles as the editor; resetTargetForm returns it to "add".
@@ -694,6 +702,14 @@ function renderRunRow(line, title, result, progress) {
   );
 }
 
+function renderSkippedRow(line, title, theme) {
+  line.className = "run-row skipped";
+  line.replaceChildren(
+    el("span", { className: "run-row-title" }, title),
+    el("span", { className: "run-row-chip muted" }, `skipped: no cases in '${theme}'`),
+  );
+}
+
 $("run-button").addEventListener("click", async () => {
   const target = currentTarget();
   if (!target) return;
@@ -709,7 +725,7 @@ $("run-button").addEventListener("click", async () => {
   $("stop-button").textContent = "Stop";
   $("stop-button").classList.remove("hidden");
   try {
-    await runMetrics(target, keys, (key, result, progress) => {
+    await runMetrics(target, keys.filter((k) => !empty.has(k)), (key, result, progress) => {
       if (!lines.has(key)) {
         lines.set(key, el("li"));
         $("run-results").append(lines.get(key));
@@ -749,6 +765,13 @@ async function renderThresholds() {
   const thresholds = await settings.get("thresholds", {});
   const saved = await settings.get("checkedMetrics", null);
   const known = new Set(state.metrics.map((m) => m.key));
+  // Metrics with no cases for this chatbot are listed as skipped, not sent.
+  const empty = new Set(state.metrics.filter(hasNoCases).map((m) => m.key));
+  for (const key of keys.filter((k) => empty.has(k))) {
+    lines.set(key, el("li"));
+    $("run-results").append(lines.get(key));
+    renderSkippedRow(lines.get(key), titles.get(key) || key, themeOf(target));
+  }
   state.checked = new Set((saved ?? [...known]).filter((key) => known.has(key)));
   $("metric-check-count").textContent = `(${state.checked.size} of ${state.metrics.length} ticked)`;
   updateRunButton();
@@ -791,7 +814,17 @@ async function renderThresholds() {
             title: metric.description || "",
           },
           tick,
-          el("span", {}, metric.title),
+          el(
+            "span",
+            {},
+            metric.title,
+            hasNoCases(metric)
+              ? el("small", {
+                  className: "no-cases",
+                  title: `No cases for this metric in the golden set '${themeOf(currentTarget())}': a run skips it.`,
+                }, " · 0 cases")
+              : null,
+          ),
           el("span", { className: "direction" }, comparator(metric.direction)),
           input,
         );

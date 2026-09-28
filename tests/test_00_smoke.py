@@ -20,4 +20,8 @@ def test_judge_api_key_env_var_name_is_consistent():
 @pytest.mark.smoke
 def test_default_golden_theme_is_seeded():
     from backend.datasets.goldens import load_goldens
+    from backend.metrics_catalog import DEFAULT_THEME
+    assert DEFAULT_THEME == "generic"
+    assert len(load_goldens(theme=DEFAULT_THEME)) >= 1
+    # The shop set stays for ShopEasy.
     assert len(load_goldens(theme="general_support")) >= 1

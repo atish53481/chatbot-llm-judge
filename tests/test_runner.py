@@ -116,7 +116,7 @@ def test_run_spec_reports_error_on_empty_dataset(tmp_path):
     spec = _fake_spec([], _fake_metric([], []))
     result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
     assert result["status"] == "error"
-    assert "empty" in result["error"]
+    assert result["error"].startswith("No goldens in theme")
     assert storage.history(conn, target_id, "fake_metric") == []
 
 
@@ -327,3 +327,19 @@ def test_run_spec_reports_a_case_note_from_the_spec(tmp_path):
     spec.build_metric = lambda judge, threshold=0.7: _fake_metric([0.9, 0.9], [True, True])
     result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
     assert result["note"] is None
+
+
+@pytest.mark.parametrize("dataset, kind, hint", [
+    ("goldens_with_context", "single", "reference context"),
+    ("goldens", "single", "No goldens"),
+    ("conversations", "conversation", "No conversation scenarios"),
+    ("security_probes", "single", "No security probes"),
+])
+def test_empty_dataset_error_says_what_is_missing(tmp_path, dataset, kind, hint):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([], _fake_metric([], []))
+    spec.dataset_name, spec.kind = dataset, kind
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id,
+                      conn=conn, theme="generic")
+    assert result["status"] == "error" and result["cases_total"] == 0
+    assert hint in result["error"] and "'generic'" in result["error"]

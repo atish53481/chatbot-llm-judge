@@ -2,7 +2,7 @@
 // from a chatbot or the backend is inserted as text, never as HTML.
 
 const ALL_METRICS = "__all__";
-const DEFAULT_THEME = "general_support";
+const DEFAULT_THEME = "generic";
 // Thresholds per metric live in chrome.storage.local ("thresholds": {key: value});
 // a metric with none set uses its catalog default. "thresholdEnv" names the
 // preset they came from (default / local / pr / staging / production / custom).

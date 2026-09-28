@@ -4,7 +4,6 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 
 from backend.datasets.goldens import load_goldens
-from backend.metrics_catalog import DEFAULT_THEME
 from backend.targets.base import ChatbotClient, ChatReply
 
 FALLBACK = "I don't have information about that. Please contact support@example.com."
@@ -15,7 +14,8 @@ def _similarity(a: str, b: str) -> float:
 
 
 class CannedChatbot(ChatbotClient):
-    def __init__(self, theme: str = DEFAULT_THEME):
+    # Answers like the ShopEasy sample bot: from the shop's golden set.
+    def __init__(self, theme: str = "general_support"):
         self.theme = theme
 
     def chat(self, message: str, history: list[dict] | None = None) -> ChatReply:

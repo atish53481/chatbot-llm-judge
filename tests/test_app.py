@@ -649,12 +649,12 @@ def test_conversation_scenarios_crud_and_reset(client):
         "theme": "t", "name": "x", "user_turns": [" "]}).status_code == 400
     client.post("/api/conversations", json={"theme": "my_bot", "name": "mine", "user_turns": ["hey"]})
 
-    assert client.post("/api/conversations/reset", json={}).json() == {"restored": 3}
+    assert client.post("/api/conversations/reset", json={}).json() == {"restored": 5}
     assert client.get("/api/conversations", params={"theme": "general_support"}).json() == shipped
     assert [c["name"] for c in client.get("/api/conversations", params={"theme": "my_bot"}).json()] == ["mine"]
     # The panel-load reset restores scenarios along with the goldens.
     client.delete(f"/api/conversations/{shipped[1]['id']}")
-    assert client.post("/api/goldens/reset", json={}).json()["conversations_restored"] == 3
+    assert client.post("/api/goldens/reset", json={}).json()["conversations_restored"] == 5
     assert len(client.get("/api/conversations", params={"theme": "general_support"}).json()) == 3
 
 

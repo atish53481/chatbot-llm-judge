@@ -110,8 +110,7 @@ def run_spec(
     except Exception as e:  # noqa: BLE001 - a broken dataset is a run error, not a crash
         return _error(spec, theme, f"{type(e).__name__}: {e}", cases_total=0)
     if not items:
-        what = "conversation scenarios" if kind == "conversation" else "dataset"
-        return _error(spec, theme, f"{what} for this metric is empty (theme {theme!r})", cases_total=0)
+        return _error(spec, theme, _empty_dataset_message(spec, theme, probe_set), cases_total=0)
     available = len(items)
     if limit:
         items = items[:limit]
@@ -190,6 +189,21 @@ def _golden_context_note(spec, rows: list[dict]) -> str | None:
     if "retrieval_context" in fields and any(r["context_source"] == "golden" for r in rows):
         return GOLDEN_CONTEXT_NOTE
     return None
+
+
+def _empty_dataset_message(spec, theme: str, probe_set: str) -> str:
+    """Says what the metric needs and where to add it, for a theme with no cases."""
+    dataset = getattr(spec, "dataset_name", "")
+    if getattr(spec, "kind", "single") == "conversation" or dataset == "conversations":
+        return (f"No conversation scenarios in theme {theme!r}. "
+                "Add one under Conversation scenarios in the side panel.")
+    if dataset == "security_probes":
+        return (f"No security probes for this metric in probe set {probe_set!r} (theme {theme!r}). "
+                "Add one in the side panel.")
+    if dataset == "goldens_with_context":
+        return (f"No goldens with reference context in theme {theme!r}. "
+                "Generate goldens from the chatbot's docs or help page to use this metric.")
+    return f"No goldens in theme {theme!r}. Add some in the side panel."
 
 
 def _case_note(spec, items: list[dict]) -> str | None:

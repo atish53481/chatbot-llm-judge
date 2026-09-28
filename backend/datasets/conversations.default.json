@@ -37,5 +37,30 @@
       "I use the email priya.sharma@example.com. What should I do?",
       "Once I'm back in, how do I turn on two-factor authentication?"
     ]
+  },
+  {
+    "id": "c_generic_remember_name",
+    "theme": "generic",
+    "name": "Remembers the user's name",
+    "scenario": "The user introduces themselves, asks an unrelated question, then checks the bot still knows their name.",
+    "chatbot_role": "a chatbot assistant",
+    "expected_outcome": "The bot answers the middle question as best it can and, when asked, says the user's name is Sam without asking for it again.",
+    "user_turns": [
+      "Hi, my name is Sam.",
+      "What kinds of things can you help me with?",
+      "Thanks. By the way, what's my name?"
+    ]
+  },
+  {
+    "id": "c_generic_change_request",
+    "theme": "generic",
+    "name": "User changes their request",
+    "scenario": "The user asks for one thing, then changes their mind halfway and asks for something shorter.",
+    "chatbot_role": "a chatbot assistant",
+    "expected_outcome": "The bot follows the latest request: it gives a short one-sentence summary of what it can do instead of continuing the longer answer.",
+    "user_turns": [
+      "Can you give me a detailed overview of everything you can help with?",
+      "Actually, never mind the details. Just tell me in one sentence."
+    ]
   }
 ]

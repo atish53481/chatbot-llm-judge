@@ -109,8 +109,15 @@ answer** on its reply — ad-hoc scores are not saved, so they never enter the t
 
 ## Golden answers
 
-Each chatbot is judged against one golden set (theme). `general_support` ships by
-default; `legacy_store` holds the answers migrated from the earlier `evals/` suite.
+Each chatbot is judged against one golden set (theme). `generic`, the default, fits
+any chatbot. Most of its questions (what can you do, talk to a human, off-topic,
+gibberish, an emergency) expect a kind of behaviour rather than facts. Its grounded
+goldens (`context_in_prompt: true`) send short made-up facts with the question
+("Answer using only the information below"), so Faithfulness, Hallucination,
+Summarization and the contextual metrics can score any chatbot on sticking to them. `general_support`
+is the online-shop set the ShopEasy sample bot answers; `legacy_store` holds the
+answers migrated from the earlier `evals/` suite. For a chatbot's own facts, give
+it its own theme and fill it from its docs.
 Add, edit or delete answers in the side panel (each row has an **Edit** button). Changes
 last until the side panel is loaded again: every fresh load (reopening the panel or
 reloading the extension) restores the shipped sets from

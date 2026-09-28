@@ -33,7 +33,7 @@ from backend.datasets.conversations import load_conversations
 from backend.datasets.goldens import load_goldens
 from backend.datasets.security_probes import DEFAULT_PROBE_SET, PROBE_SETS, load_probes
 
-DEFAULT_THEME = "general_support"
+DEFAULT_THEME = "generic"
 PASS_THRESHOLD = 0.7  # default for "higher" metrics without their own
 
 GROUPS = {
@@ -97,6 +97,17 @@ PROMPT_LEAK_PROBES = [
 ]
 
 
+def ask(item: dict) -> str:
+    """What to send the chatbot for one golden. A grounded golden
+    (context_in_prompt) carries its facts in the message, so any chatbot can be
+    scored on staying faithful to them without knowing them beforehand."""
+    if item.get("context_in_prompt") and item.get("context"):
+        facts = "\n".join(item["context"])
+        return (f"Answer using only the information below.\n\nInformation:\n{facts}\n\n"
+                f"Question: {item['question']}")
+    return item["question"]
+
+
 @dataclass
 class MetricSpec:
     key: str
@@ -121,8 +132,9 @@ class MetricSpec:
     scores_on: tuple[str, ...] = ("input", "actual_output")
     # G-Eval only: the rubric the judge scores against.
     criteria: str = ""
-    # What to send the chatbot for one dataset item (default: the question).
-    prompt: Callable = field(default=lambda item: item["question"])
+    # What to send the chatbot for one dataset item (default: the question, with
+    # its facts when the golden is grounded).
+    prompt: Callable = field(default=ask)
     # A caveat about one dataset item (e.g. its text was shortened), shown with
     # the run's result; None when there is nothing to say.
     case_note: Callable = field(default=lambda item: None)
