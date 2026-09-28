@@ -4,8 +4,17 @@
   "version": "1.0.0",
   "description": "Judge any chatbot's answers with DeepEval metrics from the Chrome side panel.",
   "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
-    "default_title": "Open LLM Judge"
+    "default_title": "Open LLM Judge",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png"
+    }
   },
   "side_panel": {
     "default_path": "sidebar/sidebar.html"
@@ -15,7 +24,8 @@
   },
   "permissions": [
     "sidePanel",
-    "storage"
+    "storage",
+    "notifications"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",

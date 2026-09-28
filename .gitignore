@@ -21,3 +21,6 @@ Images/
 
 # Log of every golden-set write (what changed, which action), for tracing lost rows.
 backend/datasets/goldens_changes.log
+
+# Output of run-backend-service.bat (the always-on backend task).
+logs/

@@ -33,12 +33,45 @@ To add a chatbot, capture one real request from its website and paste it as cURL
 Captured requests often carry session cookies or CSRF tokens that expire; when the
 chatbot starts answering 401/403, capture a fresh request and paste it again.
 
+### Judge another LLM
+
+If what you want to score is itself a model with an OpenAI-compatible chat API
+(OpenAI, Groq, a local Ollama or LM Studio, your Command Code provider, …) there is
+nothing to capture. In *Add a chatbot*, open **Or fill from an LLM API**, give the
+base URL, the model and the key (leave the key empty for a local model), and press
+**Fill from LLM API**. The URL, headers and body fill in (`/chat/completions`,
+`Authorization: Bearer …`, a `messages` body), then press **Test** and
+**Save chatbot**. The target is stored as an ordinary chatbot, so every metric runs
+against it unchanged.
+
+## Keep the backend running (optional)
+
+`run-backend.bat` stops when its window closes or you log off. To have the backend
+start with Windows, keep running while you are logged off, and restart itself 30
+seconds after any crash, register it as a scheduled task once, in PowerShell opened
+with **Run as administrator**, from the project folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-backend-task.ps1
+```
+
+It asks for your Windows password (for a Microsoft account, the account password,
+not the PIN): Windows needs it to run a task while you are logged off. Output goes to
+`logs\backend.log`. Remove it again with `.\uninstall-backend-task.ps1`.
+
+Nothing runs while the laptop sleeps, hibernates or is shut down. To stop it
+sleeping while plugged in: `powercfg /change standby-timeout-ac 0`. Chrome and a
+local chatbot also stop when you log off, so evaluations still run while you are
+logged in; the task just means the backend is always there when you are.
+
 ## Layout
 
 - `backend/` — FastAPI app (`dashboard/app.py`); the chatbot connector (`targets/`:
-  replays a request captured as cURL, `curl.py` parses it); the judge model (`judges/judge.py`); golden answers
-  (`datasets/goldens.json`); the metric catalog (`metrics_catalog.py`); run history in
-  SQLite (`storage.py`, `judge.db`).
+  replays a request captured as cURL, `curl.py` parses it, `presets.py` fills the
+  same fields for an OpenAI-compatible LLM); the judge model (`judges/judge.py`);
+  golden answers (`datasets/goldens.json`, seeded from `goldens.default.json`);
+  the metric catalog (`metrics_catalog.py`); run history in SQLite
+  (`storage.py`, `judge.db`).
 - `tests/` — pytest suite.
 - `ChatbotExtension/` — Chrome extension (side panel, dashboard tab).
 - `docs/superpowers/` — design spec and implementation plan.
@@ -94,7 +127,7 @@ score meets the threshold (≥ or ≤); each case still shows its own pass/fail.
 - **No-Prompt-Leak** sends five prompt-extraction attacks; **Summarization** asks the
   chatbot to summarise each golden's context.
 
-Security metrics send the red-team probes in `backend/datasets/security_probes.default.json` — pick **E-commerce** (orders, refunds) or **Generic** (any assistant) under the target's **Security probes**; set the target's **Chatbot role** in the side panel so Domain Misuse, Non-Advice and Role Violation know what the bot is meant to be.
+Security metrics send the red-team probes in `backend/datasets/security_probes.default.json` — pick **Generic** (any assistant, the default) or **E-commerce** (orders, refunds) under the target's **Security probes**; set the target's **Chatbot role** in the side panel so Domain Misuse, Non-Advice and Role Violation know what the bot is meant to be.
 
 The dashboard header picks the target, **Cases per run** (1 / 3 / 5 / all) and runs every visible card with **Run all visible**. Tiles show chatbot, RAG-context and judge status, **Tokens used** (judge tokens and calls since the backend started), the **Average score** of the shown cards (lower-is-better metrics counted as 1 − score), and pass / fail / pending.
 
@@ -137,6 +170,16 @@ Tick **Check judge consistency** in the side panel to have the judge score every
 reply twice (the chatbot is asked once, the judge costs about twice as much). Each
 case scores the average of the two; a run whose two scorings of one case differ by
 more than 0.15 is flagged ⚠ *judge unstable*, in the result and in the trend table.
+
+## When a run finishes
+
+A Chrome notification says how the run went ("Shop bot: 18 passed · 2 failed
+(Faithfulness, Bias)"; for a single metric that could not run, why), and the
+toolbar icon shows a badge: a green ✓ when everything passed, the number of failed
+metrics in red, or an amber ! when a metric could not run. Clicking the
+notification opens (or focuses) the dashboard; opening the side panel or dashboard
+clears the badge. A run you stop yourself is not announced. Runs happen in the
+side panel or dashboard page, so closing that page stops the run.
 
 ## Details and the PDF report
 
@@ -207,3 +250,14 @@ quick wiring checks. To run every metric against the real judge (this spends tok
 set RUN_LIVE_JUDGE=1
 .venv\Scripts\python -m pytest -m live
 ```
+
+The live job pins the integration: it drives each catalog metric through the real
+judge and checks it returns a score and a reason. It does not assert that the judge
+*passes* the sample bot — a cheap judge model is not steady enough for that (the same
+answer can score 0 then 1), which is exactly what **Check judge consistency** is for;
+the offline suite pins the pass/fail logic deterministically.
+
+The runtime datasets — `backend/datasets/goldens.json`, `conversations.json`,
+`security_probes.json` — are generated on first use from the matching
+`*.default.json` and git-ignored (they are edited at runtime and reset on every side
+panel load). To change what ships, edit the `*.default.json` files.

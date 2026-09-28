@@ -675,6 +675,7 @@ async function runKeys(keys) {
       }
       renderMetricGrid();
     }, state.runControl);
+    announceRun(target, keys, results, state.metrics);
     const failed = results.filter((r) => r.status === "error").length;
     // Stop pressed between two metrics cancels nothing in flight; the loop just ends early.
     const stopped = results.some((r) => r.status === "cancelled") || results.length < keys.length;

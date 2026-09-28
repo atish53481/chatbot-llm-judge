@@ -811,13 +811,15 @@ $("run-button").addEventListener("click", async () => {
   $("stop-button").textContent = "Stop";
   $("stop-button").classList.remove("hidden");
   try {
-    await runMetrics(target, keys.filter((k) => !empty.has(k)), (key, result, progress) => {
+    const runnable = keys.filter((k) => !empty.has(k));
+    const results = await runMetrics(target, runnable, (key, result, progress) => {
       if (!lines.has(key)) {
         lines.set(key, el("li"));
         $("run-results").append(lines.get(key));
       }
       renderRunRow(lines.get(key), titles.get(key) || key, result, progress);
     }, state.runControl);
+    announceRun(target, runnable, results, state.metrics);
   } finally {
     state.runControl = null;
     $("stop-button").classList.add("hidden");
