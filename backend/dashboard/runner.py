@@ -181,7 +181,7 @@ def run_spec(
         "cases_run": len(rows),
         "cases_total": available,
         "error": None,
-        "note": _golden_context_note(spec, rows),
+        "note": _golden_context_note(spec, rows) or _case_note(spec, items[:len(rows)]),
     }
 
 
@@ -190,6 +190,13 @@ def _golden_context_note(spec, rows: list[dict]) -> str | None:
     if "retrieval_context" in fields and any(r["context_source"] == "golden" for r in rows):
         return GOLDEN_CONTEXT_NOTE
     return None
+
+
+def _case_note(spec, items: list[dict]) -> str | None:
+    note = getattr(spec, "case_note", None)
+    if not callable(note):
+        return None
+    return next((n for n in map(note, items) if n), None)
 
 
 def judge_one(
@@ -261,7 +268,7 @@ def judge_one(
         "cases_run": 1,
         "cases_total": 1,
         "error": None,
-        "note": _golden_context_note(spec, [{"context_source": source}]),
+        "note": _golden_context_note(spec, [{"context_source": source}]) or _case_note(spec, [item]),
     }
 
 

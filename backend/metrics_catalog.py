@@ -123,6 +123,9 @@ class MetricSpec:
     criteria: str = ""
     # What to send the chatbot for one dataset item (default: the question).
     prompt: Callable = field(default=lambda item: item["question"])
+    # A caveat about one dataset item (e.g. its text was shortened), shown with
+    # the run's result; None when there is nothing to say.
+    case_note: Callable = field(default=lambda item: None)
     # Dashboard card copy: chip category, what 1.00 (or 0.00) means, and the
     # plain-language question the card asks.
     ui_category: str = ""
@@ -346,8 +349,33 @@ SPEC_CORRECTNESS = MetricSpec(
 )
 
 
-def _summary_source(item: dict) -> str:
+# Chatbots cap message length (aleeup.com rejects anything over 2,000
+# characters), so the text to summarise is cut to fit, leaving room for the
+# instruction. The judge scores the reply against the same cut text.
+SUMMARY_SOURCE_LIMIT = 1800
+SUMMARY_SHORTENED_NOTE = (
+    f"Some sources were longer than {SUMMARY_SOURCE_LIMIT} characters and were "
+    "shortened before being sent, since chatbots cap message length. The summary "
+    "is scored against the shortened text."
+)
+
+
+def _full_summary_source(item: dict) -> str:
     return "\n".join(item.get("context") or [item.get("expected_answer", "")])
+
+
+def _summary_source(item: dict) -> str:
+    text = _full_summary_source(item)
+    if len(text) <= SUMMARY_SOURCE_LIMIT:
+        return text
+    cut = text[:SUMMARY_SOURCE_LIMIT - 2]
+    # End on a word boundary so the chatbot is not handed half a word.
+    cut = cut[:cut.rfind(" ")] if " " in cut else cut
+    return cut.rstrip() + " …"
+
+
+def _summary_note(item: dict) -> str | None:
+    return SUMMARY_SHORTENED_NOTE if len(_full_summary_source(item)) > SUMMARY_SOURCE_LIMIT else None
 
 
 SPEC_SUMMARIZATION = MetricSpec(
@@ -355,6 +383,7 @@ SPEC_SUMMARIZATION = MetricSpec(
     env_column="answer_relevancy", dataset_name="goldens_with_context",
     description="Asked to summarise a golden's facts, is the summary accurate and complete?",
     prompt=lambda item: f"Summarize the following in 2-3 sentences:\n\n{_summary_source(item)}",
+    case_note=_summary_note,
     build_metric=lambda judge, threshold=0.6: SummarizationMetric(
         threshold=threshold, model=judge, include_reason=True, async_mode=False),
     build_case=lambda g, reply, retrieval=None: LLMTestCase(

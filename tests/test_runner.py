@@ -314,3 +314,16 @@ def test_run_spec_stores_how_many_cases_ran(tmp_path):
     spec = _fake_spec(cases, _fake_metric([0.9], [True]))
     run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn, limit=1)
     assert storage.latest_runs(conn, target_id)[0]["cases_run"] == 1
+
+
+def test_run_spec_reports_a_case_note_from_the_spec(tmp_path):
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("short"), _case("long")], _fake_metric([0.9, 0.9], [True, True]))
+    spec.case_note = lambda item: "input was shortened" if item["question"] == "long" else None
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert result["note"] == "input was shortened"
+
+    spec.case_note = lambda item: None
+    spec.build_metric = lambda judge, threshold=0.7: _fake_metric([0.9, 0.9], [True, True])
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
+    assert result["note"] is None

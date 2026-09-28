@@ -218,3 +218,20 @@ def test_security_cases_use_the_targets_probe_set():
 
 def test_golden_specs_accept_persona_and_ignore_it():
     assert SPECS_BY_KEY["answer_relevancy"].cases(persona="x") == SPECS_BY_KEY["answer_relevancy"].cases()
+
+
+def test_summarization_shortens_long_sources_to_fit_chatbot_limits():
+    spec = SPECS_BY_KEY["summarization"]
+    long_item = {"question": "q", "expected_answer": "a",
+                 "context": [f"Fact number {i} about the refund policy." for i in range(300)]}
+    prompt = spec.prompt(long_item)
+    # Chatbots cap message length (aleeup: 2,000 characters).
+    assert len(prompt) <= 2000
+    assert prompt.endswith("…")
+    # The judge scores against the same shortened text the chatbot was sent.
+    assert spec.build_case(long_item, "r").input in prompt
+    assert "shortened" in spec.case_note(long_item)
+
+    short_item = {**long_item, "context": ["One fact.", "Another fact."]}
+    assert spec.prompt(short_item).endswith("One fact.\nAnother fact.")
+    assert spec.case_note(short_item) is None
