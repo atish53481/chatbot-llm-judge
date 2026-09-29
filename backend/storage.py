@@ -23,6 +23,7 @@ RUN_EXTRA_COLUMNS = (
     ("duration_s", "REAL"),
     ("judge_spread", "REAL"),
     ("cases_skipped", "INTEGER"),
+    ("result_json", "TEXT"),
 )
 
 
@@ -88,6 +89,30 @@ def init_db(path: str) -> sqlite3.Connection:
             "UPDATE documents SET status = 'error', error = ? "
             "WHERE status IN ('queued', 'processing', 'enhancing', 'generating')",
             ("interrupted: the backend stopped before this document finished; upload it again",),
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                metric_keys TEXT NOT NULL,
+                options TEXT NOT NULL DEFAULT '{}',
+                results TEXT NOT NULL DEFAULT '[]',
+                current TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT
+            )
+            """
+        )
+        # A job lives in the backend process: one still queued or running when
+        # the backend stopped will never finish.
+        conn.execute(
+            "UPDATE jobs SET status = 'interrupted', error = ?, current = NULL "
+            "WHERE status IN ('queued', 'running')",
+            (JOB_INTERRUPTED,),
         )
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         _migrate_targets(conn)
@@ -231,14 +256,16 @@ def record_run(
     duration_s: float | None = None,
     judge_spread: float | None = None,
     cases_skipped: int | None = None,
+    result_json: str | None = None,
 ) -> int:
     with _LOCK:
         cur = conn.execute(
             "INSERT INTO runs (target_id, metric_key, score, passed, ts, cases_run, judge_model,"
-            " judge_tokens, judge_calls, target_calls, duration_s, judge_spread, cases_skipped)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " judge_tokens, judge_calls, target_calls, duration_s, judge_spread, cases_skipped,"
+            " result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (target_id, metric_key, score, int(passed), ts, cases_run, judge_model,
-             judge_tokens, judge_calls, target_calls, duration_s, judge_spread, cases_skipped),
+             judge_tokens, judge_calls, target_calls, duration_s, judge_spread, cases_skipped,
+             result_json),
         )
         conn.commit()
         return cur.lastrowid
@@ -268,6 +295,58 @@ def history(conn: sqlite3.Connection, target_id: int, metric_key: str) -> list[d
             (target_id, metric_key),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# Background runs (backend/dashboard/jobs.py): one row per batch of metrics.
+JOB_INTERRUPTED = "the backend stopped before this run finished; run it again"
+_JOB_JSON = {"metric_keys": [], "options": {}, "results": [], "current": None}
+
+
+def _job(row) -> dict:
+    job = dict(row)
+    for key, empty in _JOB_JSON.items():
+        job[key] = json.loads(job[key]) if job[key] else empty
+    return job
+
+
+def add_job(conn: sqlite3.Connection, target_id: int, metric_keys: list[str], options: dict) -> int:
+    with _LOCK:
+        cur = conn.execute(
+            "INSERT INTO jobs (target_id, status, metric_keys, options, created_at) VALUES (?, 'queued', ?, ?, ?)",
+            (target_id, json.dumps(metric_keys), json.dumps(options), _now_iso()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_job(conn: sqlite3.Connection, job_id: int) -> dict | None:
+    with _LOCK:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return _job(row) if row else None
+
+
+def update_job(conn: sqlite3.Connection, job_id: int, **fields) -> None:
+    """Field names come from this codebase only (never from a request)."""
+    encoded = {k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in fields.items()}
+    assignments = ", ".join(f"{k} = ?" for k in encoded)
+    with _LOCK:
+        conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", (*encoded.values(), job_id))
+        conn.commit()
+
+
+def active_jobs(conn: sqlite3.Connection, target_id: int) -> list[dict]:
+    with _LOCK:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE target_id = ? AND status IN ('queued', 'running') ORDER BY id DESC",
+            (target_id,),
+        ).fetchall()
+    return [_job(r) for r in rows]
+
+
+def next_queued_job(conn: sqlite3.Connection) -> dict | None:
+    with _LOCK:
+        row = conn.execute("SELECT * FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1").fetchone()
+    return _job(row) if row else None
 
 
 def _now_iso() -> str:

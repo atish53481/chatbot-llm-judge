@@ -174,3 +174,43 @@ def test_old_runs_table_gets_the_judging_columns(tmp_path):
     conn = storage.init_db(path)
     row = storage.history(conn, 1, "m")[0]
     assert row["score"] == 0.5 and row["judge_model"] is None and row["judge_spread"] is None
+
+
+def test_jobs_are_stored_listed_and_updated(tmp_path):
+    conn = storage.init_db(str(tmp_path / "j.db"))
+    first = storage.add_job(conn, 1, ["bias", "toxicity"], {"limit": 3})
+    second = storage.add_job(conn, 1, ["bias"], {})
+    job = storage.get_job(conn, first)
+    assert job["status"] == "queued" and job["metric_keys"] == ["bias", "toxicity"]
+    assert job["options"] == {"limit": 3} and job["results"] == [] and job["current"] is None
+    assert storage.next_queued_job(conn)["id"] == first
+    storage.update_job(conn, first, status="running", current={"metric_key": "bias"})
+    assert storage.get_job(conn, first)["current"] == {"metric_key": "bias"}
+    assert [j["id"] for j in storage.active_jobs(conn, 1)] == [second, first]
+    storage.update_job(conn, first, status="done", results=[{"key": "bias"}])
+    assert storage.next_queued_job(conn)["id"] == second
+    assert [j["id"] for j in storage.active_jobs(conn, 1)] == [second]
+    assert storage.get_job(conn, 999) is None
+
+
+def test_unfinished_jobs_are_interrupted_on_start(tmp_path):
+    path = str(tmp_path / "j.db")
+    conn = storage.init_db(path)
+    running = storage.add_job(conn, 1, ["bias"], {})
+    storage.update_job(conn, running, status="running")
+    queued = storage.add_job(conn, 1, ["bias"], {})
+    done = storage.add_job(conn, 1, ["bias"], {})
+    storage.update_job(conn, done, status="done")
+    conn.close()
+    conn = storage.init_db(path)
+    for job_id in (running, queued):
+        job = storage.get_job(conn, job_id)
+        assert job["status"] == "interrupted" and job["error"] == storage.JOB_INTERRUPTED
+    assert storage.get_job(conn, done)["status"] == "done"
+
+
+def test_runs_keep_their_full_result(tmp_path):
+    conn = storage.init_db(str(tmp_path / "r.db"))
+    target_id = storage.add_target(conn, "bot", "http", {})
+    storage.record_run(conn, target_id, "m", 0.8, True, "2026-01-01T00:00:00Z", result_json='{"rows": []}')
+    assert storage.latest_runs(conn, target_id)[0]["result_json"] == '{"rows": []}'
