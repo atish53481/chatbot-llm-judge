@@ -11,7 +11,10 @@ node_modules/
 .venv/
 *.stackdump
 
-# Edited copy of conversations.default.json (reset on every side panel load).
+# Runtime copies of the shipped datasets, seeded from *.default.json on first
+# use and reset on every side panel load: the golden answers, conversation
+# scenarios and red-team probes the app edits.
+backend/datasets/goldens.json
 backend/datasets/conversations.json
 backend/datasets/security_probes.json
 

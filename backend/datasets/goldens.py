@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import threading
 import uuid
@@ -22,6 +23,11 @@ _LOCK = threading.RLock()
 
 
 def _read_all() -> list[dict]:
+    # goldens.json is runtime state (it is git-ignored, like the DB and the
+    # edited conversations/probes). On a fresh checkout it does not exist yet,
+    # so seed it from the shipped defaults.
+    if not os.path.exists(GOLDENS_PATH):
+        shutil.copyfile(DEFAULT_GOLDENS_PATH, GOLDENS_PATH)
     with open(GOLDENS_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
