@@ -12,7 +12,7 @@ try:
 except ImportError:
     Groq = None
 
-GROQ_MODEL = os.getenv("CHATBOT_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("CHATBOT_MODEL", "qwen/qwen3.8-27b")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 SYSTEM_PROMPT = """You are ShopBot, the customer support assistant for ShopSphere — a mid-sized e-commerce store that sells electronics, apparel, and home goods.
