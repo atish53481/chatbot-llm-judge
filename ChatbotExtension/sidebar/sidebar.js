@@ -819,7 +819,6 @@ $("run-button").addEventListener("click", async () => {
       }
       renderRunRow(lines.get(key), titles.get(key) || key, result, progress);
     }, state.runControl);
-    announceRun(target, runnable, results, state.metrics);
   } finally {
     state.runControl = null;
     $("stop-button").classList.add("hidden");
