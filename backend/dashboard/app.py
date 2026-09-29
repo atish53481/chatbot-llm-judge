@@ -23,7 +23,8 @@ from backend.datasets import goldens as goldens_store
 from backend.datasets import security_probes as probes_store
 from backend.judges.judge import build_judge, judge_config
 from backend.metrics_catalog import (
-    ALL_SPECS, DEFAULT_THEME, ENVIRONMENTS, GROUPS, SPECS_BY_KEY, UI_CATEGORIES, UI_CATEGORY_LABELS,
+    ALL_SPECS, DEFAULT_THEME, ENVIRONMENTS, GROUPS, PROBE_DATASETS, SPECS_BY_KEY, UI_CATEGORIES,
+    UI_CATEGORY_LABELS,
 )
 from backend.rag.enhance import enhance_document
 from backend.rag.fetch import fetch_page_text
@@ -39,6 +40,7 @@ from backend.targets.curl import (
     prepare_url,
 )
 from backend.targets.http_client import HttpTargetClient, is_stream, sse_events
+from backend.targets import presets as target_presets
 
 DB_PATH = os.getenv("JUDGE_DB_PATH", "judge.db")
 TARGET_TYPES = ("http",)
@@ -137,6 +139,14 @@ class TargetTest(BaseModel):
     message: str = Field(default="Hello", min_length=1)
     # Editing: reuse the stored headers when the form sends none (they are masked).
     target_id: int | None = None
+
+
+class LlmImport(BaseModel):
+    """An OpenAI-compatible LLM API to fill the chatbot form from (targets/presets.py)."""
+    base_url: str = Field(default=target_presets.DEFAULT_BASE_URL, max_length=500)
+    model: str = Field(default="", max_length=200)
+    api_key: str = Field(default="", max_length=500)
+    system_prompt: str = Field(default="", max_length=4000)
 
 
 class GoldenCreate(BaseModel):
@@ -272,6 +282,19 @@ def _probe_reply_path(parsed: dict, message: str) -> dict:
     except Exception as e:  # noqa: BLE001 - the fields are still filled; the user can fix the path
         return {"probe_error": f"{type(e).__name__}: {e}"}
     return {"response_path": path, "context_path": context_path, "reply_preview": reply[:500]}
+
+
+@app.post("/api/targets/parse-llm")
+def api_parse_llm(body: LlmImport):
+    """Fills the chatbot form for an OpenAI-compatible LLM API, so another model
+    can be judged without capturing a request from a website."""
+    try:
+        return target_presets.build_llm_config(
+            base_url=body.base_url, model=body.model,
+            api_key=body.api_key, system_prompt=body.system_prompt,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.post("/api/targets/test")
@@ -656,7 +679,7 @@ class ProbeFields(BaseModel):
     metric: str = Field(min_length=1, max_length=64)
     question: str = Field(min_length=1, max_length=2000)
     note: str = Field(default="", max_length=500)
-    set: str = Field(default="ecommerce", max_length=32)
+    set: str = Field(default=probes_store.DEFAULT_PROBE_SET, max_length=32)
 
 
 @app.get("/api/security-probes")
@@ -790,7 +813,8 @@ def api_list_metrics(target_id: int | None = None):
             # Why this metric cannot run for this chatbot (None when it can).
             "unavailable": unavailable(s),
             # Which security probe set this target sends (None for other datasets).
-            "probe_set": (probe_set or "ecommerce") if s.dataset_name == "security_probes" else None,
+            "probe_set": (probe_set or probes_store.DEFAULT_PROBE_SET)
+            if s.dataset_name in PROBE_DATASETS else None,
             # How to improve it when it fails: steps for the chatbot and for the test.
             "improve": s.improve,
         }

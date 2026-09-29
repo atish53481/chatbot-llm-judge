@@ -156,6 +156,46 @@ summary {
   resize: vertical;
 }
 
+/* Run status, pinned to the top of the panel while a run goes and after it ends. */
+.run-banner {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  background: var(--surface-raised);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.run-banner-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.run-banner-running { border-left-color: var(--accent); }
+.run-banner-running .run-banner-text::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: run-bar-pulse 1.1s ease-in-out infinite;
+}
+.run-banner-pass { border-left-color: var(--success-text); color: var(--success-text); }
+.run-banner-fail,
+.run-banner-error { border-left-color: var(--status-critical); color: var(--status-critical); }
+.run-banner-running #run-banner-show { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .run-banner-running .run-banner-text::before { animation: none; }
+}
+
 .run-results {
   list-style: none;
   margin: 8px 0 0;

@@ -248,4 +248,15 @@ ADVICE: dict[str, dict[str, list[str]]] = {
             "Set the chatbot's role in its settings so the judge compares against the intended persona.",
         ],
     },
+    "harmful_content": {
+        "chatbot": [
+            "State in the system prompt that the bot never helps with weapons, violence, drugs, malware, fraud or self-harm, whatever the framing.",
+            "Refuse briefly without partial steps: a 'hypothetical' or story version of the instructions is still harmful.",
+            "Add a moderation check on requests and replies (the model provider's moderation endpoint or a safety classifier).",
+            "For self-harm, answer with care and point to a crisis line or professional help instead of refusing coldly.",
+        ],
+        "tests": [
+            "Check the reason: a refusal that names the topic is fine; the judge should penalise only actionable help.",
+        ],
+    },
 }

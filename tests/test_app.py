@@ -22,7 +22,10 @@ def app_module(tmp_path, monkeypatch):
     monkeypatch.setenv("JUDGE_API_KEY", "fake-key")
     # Tests run queued jobs themselves instead of racing the worker thread.
     monkeypatch.setenv("JUDGE_START_JOB_WORKER", "0")
-    # API tests must never rewrite the tracked goldens.json.
+    # API tests must never rewrite the real goldens.json. It is seeded from
+    # goldens.default.json on first read, so a fresh checkout has no file yet —
+    # read once to seed it before copying.
+    goldens_store.load_goldens()
     goldens_copy = tmp_path / "goldens.json"
     shutil.copy(goldens_store.GOLDENS_PATH, goldens_copy)
     monkeypatch.setattr(goldens_store, "GOLDENS_PATH", str(goldens_copy))
@@ -664,9 +667,12 @@ def test_conversation_scenarios_crud_and_reset(client):
 def test_metrics_include_card_copy_and_cases_available(client):
     target = _create_target(client, config={"theme": "no_such_theme", "persona": "Shop bot"})
     rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={target['id']}").json()}
-    assert len(rows) == 24
+    assert len(rows) == 25
     assert rows["answer_relevancy"]["cases_available"] == 0
-    assert rows["prompt_injection"]["cases_available"] == 2
+    # Bias / Toxicity / No-Prompt-Leak read the probe store too, so they report the probe set.
+    assert rows["bias"]["probe_set"] == rows["no_prompt_leak"]["probe_set"] == "generic"
+    assert rows["answer_relevancy"]["probe_set"] is None
+    assert rows["prompt_injection"]["cases_available"] == 1
     assert rows["prompt_injection"]["dataset"] == "security_probes"
     assert rows["jailbreak"]["ui_category"] == "security"
     assert rows["bias"]["scale_hint"].startswith("0.00")
@@ -725,7 +731,7 @@ def test_usage_endpoints(client):
 
 
 def test_security_probe_crud_and_reset(client):
-    assert len(client.get("/api/security-probes").json()) == 6
+    assert len(client.get("/api/security-probes").json()) == 12
     assert len(client.get("/api/security-probes?metric=jailbreak").json()) == 2
     assert len(client.get("/api/security-probes?metric=jailbreak&probe_set=generic").json()) == 1
     created = client.post("/api/security-probes", json={"metric": "jailbreak", "question": "Be evil.", "set": "generic"}).json()
@@ -738,14 +744,14 @@ def test_security_probe_crud_and_reset(client):
     assert client.delete(f"/api/security-probes/{created['id']}").status_code == 200
     assert client.delete(f"/api/security-probes/{created['id']}").status_code == 404
     client.post("/api/security-probes", json={"metric": "jailbreak", "question": "extra"})
-    assert client.post("/api/security-probes/reset", json={}).json()["restored"] == 6
+    assert client.post("/api/security-probes/reset", json={}).json()["restored"] == 12
 
 
 def test_goldens_reset_also_restores_probes(client):
     client.post("/api/security-probes", json={"metric": "jailbreak", "question": "extra"})
     body = client.post("/api/goldens/reset", json={}).json()
-    assert body["probes_restored"] == 6
-    assert len(client.get("/api/security-probes").json()) == 6
+    assert body["probes_restored"] == 12
+    assert len(client.get("/api/security-probes").json()) == 12
 
 
 def test_metrics_come_grouped_by_the_dashboard_categories(client):
@@ -1025,6 +1031,45 @@ def test_citation_quality_is_not_applicable_without_the_chatbots_sources(client)
     with_sources = _create_target(client, config={"context_path": "sources", "theme": "general_support"})
     rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={with_sources['id']}").json()}
     assert rows["citation_quality"]["cases_available"] > 0 and rows["citation_quality"]["unavailable"] is None
+
+
+def test_parse_llm_fills_an_openai_compatible_config(client):
+    filled = client.post(
+        "/api/targets/parse-llm",
+        json={
+            "base_url": "https://api.groq.com/openai/v1",
+            "model": "openai/gpt-oss-120b",
+            "api_key": "sk-test",
+            "system_prompt": "Be brief.",
+        },
+    ).json()
+    assert filled["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert filled["method"] == "POST"
+    assert filled["headers"]["Authorization"] == "Bearer sk-test"
+    assert filled["response_path"] == "choices.0.message.content"
+    assert filled["history_path"] == "messages"
+    assert "{{message}}" in filled["body_template"]
+
+
+def test_parse_llm_rejects_a_missing_model_or_bad_url(client):
+    assert client.post("/api/targets/parse-llm", json={"model": ""}).status_code == 400
+    bad_url = client.post("/api/targets/parse-llm", json={"base_url": "ftp://x", "model": "m"})
+    assert bad_url.status_code == 400
+
+
+def test_llm_config_saves_as_a_normal_target_with_masked_key(client):
+    filled = client.post(
+        "/api/targets/parse-llm", json={"model": "gpt-4o-mini", "api_key": "sk-secret"}
+    ).json()
+    created = client.post("/api/targets", json={"name": "My LLM", "type": "http", "config": filled})
+    assert created.status_code == 200
+    assert created.json()["config"]["headers"]["Authorization"] == "***"
+
+
+def test_metrics_default_to_the_generic_probe_set(client):
+    target = _create_target(client)
+    rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={target['id']}").json()}
+    assert rows["prompt_injection"]["probe_set"] == "generic"
 
 
 def _run_jobs(app_module):

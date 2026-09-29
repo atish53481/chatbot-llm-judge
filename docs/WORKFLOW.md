@@ -11,7 +11,7 @@ How a judged answer travels from a click in the side panel to a score on the cha
 | Service worker | `ChatbotExtension/background.js` | Opens the side panel and the dashboard tab. |
 | Backend | `backend/dashboard/app.py` | FastAPI control plane on `http://127.0.0.1:8000`. |
 | Judge | `backend/judges/judge.py` | The scoring model — never the chatbot under test. |
-| Metrics catalog | `backend/metrics_catalog.py` | The 24 metrics in 6 groups (incl. 8 Security red-team metrics): direction (≥ / ≤), default threshold, environment presets, what each scores on. |
+| Metrics catalog | `backend/metrics_catalog.py` | The 25 metrics in 6 groups (incl. 9 Security red-team metrics): direction (≥ / ≤), default threshold, environment presets, what each scores on. |
 | Storage | `backend/storage.py` | SQLite (`judge.db`): targets, run history, documents, judge settings. |
 | Goldens | `backend/datasets/goldens.json` | Question / expected-answer sets by theme. |
 
@@ -24,9 +24,59 @@ How a judged answer travels from a click in the side panel to a score on the cha
 
 ## 1. Startup
 
-1. `run-backend.bat` creates `.venv` on first use, installs `requirements.txt`, then
-   starts uvicorn. `.env` supplies `JUDGE_API_KEY` (and optional `JUDGE_MODEL`,
-   `JUDGE_BASE_URL`, `JUDGE_DB_PATH`).
+### Starting the backend
+
+Both scripts start the same server (uvicorn, `backend.dashboard.app:app` on
+`127.0.0.1:8000`). They differ in who runs them and what happens when it stops.
+
+| | `run-backend.bat` (manual) | `run-backend-service.bat` (always-on) |
+|---|---|---|
+| Run by | You: double-click, or `& '.\run-backend.bat'` in PowerShell | The "LLM Judge Backend" scheduled task, at boot. Not meant to run by hand |
+| Window / output | Console window | None; `logs\backend.log` (older log kept as `backend.old.log` past ~5 MB) |
+| First run | Creates `.venv` and installs `requirements.txt` | Needs `.venv`; logs ".venv is missing" and waits |
+| Port 8000 busy | Stops an older LLM Judge backend so new code loads; other programs are left alone | Waits and checks again every 30 s |
+| Crash / stop | Prints the error and pauses | Starts it again after 30 s, forever |
+| Stop it | Ctrl+C | `uninstall-backend-task.ps1` (or Task Scheduler) |
+
+Run by hand, `run-backend-service.bat` prints nothing and never returns, so the
+terminal looks frozen: stop it with Ctrl+C, then `Y`.
+
+```
+ first time ever:  run-backend.bat ── creates .venv ──► backend up (window)
+                                                              │
+        ┌─────────────────────────────────────────────────────┘
+        ▼
+ working on code?  ── yes ──► run-backend.bat each session (restarts on new code)
+        │
+        no, want it always on
+        ▼
+ install-backend-task.ps1 (admin PowerShell, once)
+   ├─ stops any backend already running from this folder
+   ├─ registers "LLM Judge Backend": at startup, runs while logged off
+   │     └─► cmd /c run-backend-service.bat ──► loop: start uvicorn,
+   │                                            restart 30 s after it stops
+   └─ waits for /api/status to answer
+        │
+        ▼
+ back to manual:  uninstall-backend-task.ps1 (admin) ──► task removed, backend stopped
+```
+
+Task setup, from the project folder in PowerShell opened with "Run as administrator":
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-backend-task.ps1    # asks for your Windows password
+powershell -ExecutionPolicy Bypass -File .\uninstall-backend-task.ps1  # removes it again
+```
+
+With the task installed, `run-backend.bat` still works: it takes over port 8000,
+and the service loop waits until the port is free again. Nothing runs while the
+laptop sleeps or is shut down.
+
+### What happens on start
+
+1. The start script sets `DEEPEVAL_TELEMETRY_OPT_OUT`, `PYTHONUNBUFFERED` and
+   `PYTHONUTF8`, then starts uvicorn from `.venv`. `.env` supplies `JUDGE_API_KEY`
+   (and optional `JUDGE_MODEL`, `JUDGE_BASE_URL`, `JUDGE_DB_PATH`).
 2. On import, `backend/dashboard/app.py` opens `judge.db` and creates the tables.
    `storage.init_db` also migrates older HTTP chatbots to the cURL-template config and
    drops retired sample (`mock`) and web-page (`dom`) chatbots.
@@ -91,11 +141,15 @@ dataset, target/judge exception) rather than raising.
 ### Security metrics
 
 Each Security metric (Prompt Injection, Jailbreak, Encoded Injection, Data Exfiltration,
-Social Engineering, Domain Misuse, Non-Advice, Role Violation) sends its probes from
+Social Engineering, Domain Misuse, Non-Advice, Role Violation, Harmful Content) sends its probes from
 `security_probes.json` (shipped: `security_probes.default.json`, restored by the goldens
 reset) to the chatbot. Each case's context is the target's **Chatbot role** (`persona`),
 or a note telling the judge to use the role the bot claims; G-Eval scores 1.0 when the
 reply resisted the attack.
+
+The same file holds adversarial prompts for three safety metrics, picked by the same
+probe set: **No-Prompt-Leak** sends only them; **Bias** and **Toxicity** send them first,
+then the goldens (`MetricSpec.cases`, datasets `prompt_leak_probes` / `safety_probes`).
 
 ### Dashboard: Run all visible
 

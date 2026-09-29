@@ -26,7 +26,8 @@ function updateRunButton() {
   const button = $("run-button");
   const ready = state.judgeUp && currentTarget() !== null;
   const count = state.checked.size;
-  button.textContent = count ? `Run judge (${count} metric${count === 1 ? "" : "s"})` : "Run judge";
+  button.textContent = state.runControl !== null ? "Running…"
+    : count ? `Run judge (${count} metric${count === 1 ? "" : "s"})` : "Run judge";
   // The status refresh calls this every 10s; a run in flight keeps the button off.
   button.disabled = !ready || state.runControl !== null || count === 0;
   if (ready && count === 0) button.title = "Tick at least one metric";
@@ -100,7 +101,8 @@ async function onTargetChanged() {
   const job = target ? await activeJob(target) : null;
   if (job && state.runControl === null) {
     const titles = new Map(state.metrics.map((m) => [m.key, m.title]));
-    watchRun(target, new Map(), titles, (onProgress, control) => followJob(target, job.id, onProgress, control));
+    watchRun(target, new Map(), titles, (onProgress, control) => followJob(target, job.id, onProgress, control),
+      (job.metric_keys || []).length);
   }
 }
 
@@ -114,6 +116,7 @@ function resetTargetForm() {
   $("target-headers-hint").classList.add("hidden");
   $("curl-import").open = true;
   $("curl-status").textContent = "";
+  $("llm-status").textContent = "";
   $("target-test-result").textContent = "";
 }
 
@@ -130,7 +133,7 @@ function startEditTarget(target) {
   $("target-response-path").value = config.response_path || "";
   $("target-context-path").value = config.context_path || "";
   $("target-persona").value = config.persona || "";
-  $("target-probe-set").value = config.probe_set || "ecommerce";
+  $("target-probe-set").value = config.probe_set || "generic";
   $("target-history-path").value = config.history_path || "";
   $("target-max-length").value = config.max_message_length ?? "";
   $("target-send-delay").value = config.send_delay || "";
@@ -138,6 +141,7 @@ function startEditTarget(target) {
   $("target-theme-input").value = themeOf(target);
   $("curl-import").open = false;
   $("curl-status").textContent = "";
+  $("llm-import").open = false;
   $("target-test-result").textContent = "";
   $("target-submit").textContent = "Save changes";
   $("target-cancel").classList.remove("hidden");
@@ -469,6 +473,45 @@ $("curl-input").addEventListener("paste", () => {
   $("curl-sample-message").value = "";
   setTimeout(fillFromCurl, 0);
 });
+
+// Fills the form for an OpenAI-compatible LLM API, so another model can be
+// judged directly (no request capture). The config saves as a normal http target.
+async function fillFromLlm() {
+  const status = $("llm-status");
+  status.className = "small";
+  status.textContent = "Filling the form…";
+  $("llm-fill").disabled = true;
+  try {
+    const filled = await api("/api/targets/parse-llm", {
+      method: "POST",
+      body: {
+        base_url: $("llm-base-url").value.trim(),
+        model: $("llm-model").value.trim(),
+        api_key: $("llm-api-key").value.trim(),
+        system_prompt: $("llm-system-prompt").value.trim(),
+      },
+    });
+    $("target-method").value = filled.method;
+    $("target-url").value = filled.url;
+    $("target-headers").value = Object.entries(filled.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
+    $("target-body").value = filled.body_template;
+    $("target-response-path").value = filled.response_path;
+    $("target-context-path").value = filled.context_path || "";
+    $("target-history-path").value = filled.history_path || "";
+    if (!$("target-name").value.trim()) {
+      $("target-name").value = `${$("llm-model").value.trim()} (LLM)`.slice(0, 80);
+    }
+    status.className = "small status-pass";
+    status.textContent = "Filled. Check the fields below, then Test and Save chatbot.";
+  } catch (error) {
+    status.className = "small status-error";
+    status.textContent = error.message;
+  } finally {
+    $("llm-fill").disabled = false;
+  }
+}
+
+$("llm-fill").addEventListener("click", fillFromLlm);
 
 $("target-test").addEventListener("click", async () => {
   const result = $("target-test-result");
@@ -813,14 +856,16 @@ $("run-button").addEventListener("click", async () => {
     renderSkippedRow(lines.get(key), titles.get(key) || key, themeOf(target), metric && metric.unavailable);
   }
   const runnable = keys.filter((k) => !empty.has(k));
-  await watchRun(target, lines, titles, (onProgress, control) => runMetrics(target, runnable, onProgress, control));
+  await watchRun(target, lines, titles, (onProgress, control) => runMetrics(target, runnable, onProgress, control),
+    runnable.length);
 });
 
 // Shows a run in the results list, with Stop, until it ends: a new job, or one
 // already running (started before this panel was opened). lines holds the rows
 // already shown; start(onProgress, control) runs or follows the job.
-async function watchRun(target, lines, titles, start) {
+async function watchRun(target, lines, titles, start, count) {
   $("run-button").disabled = true;
+  $("run-button").textContent = "Running…";
   const control = {
     metrics: state.metrics,
     onOffline: (off) => { $("status").textContent = off ? "Backend not reachable, retrying…" : ""; },
@@ -829,6 +874,20 @@ async function watchRun(target, lines, titles, start) {
   $("stop-button").disabled = false;
   $("stop-button").textContent = "Stop";
   $("stop-button").classList.remove("hidden");
+  // The banner at the top of the panel says how the run is going and, once it
+  // ends, how it ended; it stays until dismissed or the next run starts.
+  const startedAt = Date.now();
+  const finished = new Map();
+  let current = "";
+  let queued = false;
+  const showProgress = () => showRunBanner(runSummary({
+    status: queued ? "queued" : "running", results: [...finished.values()], count, current,
+    elapsedMs: Date.now() - startedAt,
+  }));
+  showProgress();
+  announceRun(`Run started for ${target.name}.`);
+  const ticker = setInterval(showProgress, 1000);
+  let summary;
   try {
     await start((key, result, progress) => {
       if (!lines.has(key)) {
@@ -836,18 +895,46 @@ async function watchRun(target, lines, titles, start) {
         $("run-results").append(lines.get(key));
       }
       renderRunRow(lines.get(key), titles.get(key) || key, result, progress);
+      if (result) finished.set(key, result);
+      else {
+        queued = Boolean(progress && progress.queued);
+        current = titles.get(key) || key;
+      }
+      showProgress();
     }, control);
-    if (control.jobStatus === "error" || control.jobStatus === "interrupted") {
-      $("status").textContent = `Run ${control.jobStatus}: ${control.jobError || ""}`;
-    }
+    const status = control.jobStatus || (finished.size ? "done" : "empty");
+    summary = runSummary({
+      status, results: [...finished.values()], count, error: control.jobError,
+      elapsedMs: Date.now() - startedAt, at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    });
   } catch (error) {
-    $("status").textContent = error.message;
+    summary = runSummary({ status: "failed", error: error.message });
   } finally {
+    clearInterval(ticker);
     state.runControl = null;
     $("stop-button").classList.add("hidden");
     updateRunButton();
   }
+  showRunBanner(summary);
+  announceRun(summary.text);
 }
+
+function showRunBanner({ tone, text }) {
+  $("run-banner-text").textContent = text;
+  $("run-banner").className = `run-banner run-banner-${tone}`;
+}
+
+// Screen readers hear the start and the end once, not every second's update.
+function announceRun(text) {
+  $("run-announce").textContent = text;
+}
+
+$("run-banner-show").addEventListener("click", () => {
+  $("run-results").scrollIntoView({ behavior: "smooth", block: "center" });
+});
+$("run-banner-close").addEventListener("click", () => {
+  $("run-banner").classList.add("hidden");
+});
 
 $("stop-button").addEventListener("click", async () => {
   if (!state.runControl) return;

@@ -298,6 +298,9 @@ def _empty_dataset_message(spec, theme: str, probe_set: str) -> str:
     if dataset == "security_probes":
         return (f"No security probes for this metric in probe set {probe_set!r} (theme {theme!r}). "
                 "Add one in the side panel.")
+    if dataset == "prompt_leak_probes":
+        return (f"No prompt-leak probes in probe set {probe_set!r}. "
+                "Add one at /api/security-probes with metric \"no_prompt_leak\".")
     if dataset == "goldens_with_context":
         return (f"No goldens with reference context in theme {theme!r}. "
                 "Generate goldens from the chatbot's docs or help page to use this metric.")

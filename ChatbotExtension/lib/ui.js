@@ -241,6 +241,45 @@ async function fetchTargets() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function formatElapsed(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+// What the side panel's run banner says: progress while a run goes, then how
+// it ended. status is the job's ("running", "queued", "done", "cancelled",
+// "error", "interrupted") or "empty" when nothing could be sent; results are
+// the finished metrics; count how many were sent; current the running metric's
+// title; at the finish time to show. tone picks the banner colour.
+function runSummary({ status, results = [], count = 0, elapsedMs = 0, error = null, current = "", at = "" }) {
+  const took = formatElapsed(elapsedMs);
+  const finished = results.filter((r) => r.status !== "cancelled");
+  const passed = finished.filter((r) => r.status === "pass").length;
+  const failed = finished.filter((r) => r.status === "fail").length;
+  const errors = finished.filter((r) => r.status === "error").length;
+  const tally = [
+    passed ? `${passed} passed` : "", failed ? `${failed} failed` : "", errors ? `${errors} could not run` : "",
+  ].filter(Boolean).join(" · ");
+  const when = at ? ` at ${at}` : "";
+  if (status === "queued") return { tone: "running", text: `Waiting for the run before this one to finish… ${took}` };
+  if (status === "running") {
+    const n = Math.min(finished.length + 1, count || finished.length + 1);
+    return { tone: "running", text: `Running metric ${n} of ${count || n}${current ? `: ${current}` : ""} · ${took}` };
+  }
+  if (status === "empty") {
+    return { tone: "error", text: "Nothing ran: the ticked metrics have no cases for this chatbot." };
+  }
+  if (status === "done") {
+    const tone = failed ? "fail" : errors ? "error" : "pass";
+    const mark = { pass: "✓", fail: "✕", error: "!" }[tone];
+    return { tone, text: `${mark} Run complete${when} · ${tally || "no results"} · took ${took}` };
+  }
+  if (status === "cancelled") {
+    return { tone: "error", text: `■ Run stopped${when} · ${finished.length} of ${count} finished${tally ? ` (${tally})` : ""}` };
+  }
+  return { tone: "error", text: `✕ Run ${status || "failed"}${when}${error ? `: ${error}` : ""}` };
+}
+
 // A backend job's live progress in the shape progressText/progressFraction read.
 function jobProgress(current) {
   return {

@@ -1,4 +1,5 @@
-"""Red-team probes for the Security metrics.
+"""Red-team probes for the Security metrics and adversarial prompts for the
+safety metrics (Bias, Toxicity, No-Prompt-Leak).
 
 Each probe is one attack message sent to the chatbot; the judge scores whether
 the reply resisted it. Like the golden answers: the shipped probes are in
@@ -19,15 +20,22 @@ PROBES_PATH = os.path.join(_DIR, "security_probes.json")
 DEFAULT_PROBES_PATH = os.path.join(_DIR, "security_probes.default.json")
 _LOCK = threading.RLock()
 
-# "ecommerce" probes talk about orders, refunds and customers (the shipped
-# ShopEasy bot); "generic" ones fit any assistant. A target picks one set.
-PROBE_SETS = ("ecommerce", "generic")
-DEFAULT_PROBE_SET = "ecommerce"
+# "generic" probes fit any assistant and are the default (the app judges any
+# chatbot, not just a shop); "ecommerce" ones talk about orders, refunds and
+# customers (the shipped ShopEasy bot). A target picks one set.
+PROBE_SETS = ("generic", "ecommerce")
+DEFAULT_PROBE_SET = "generic"
 
 SECURITY_METRICS = (
     "prompt_injection", "jailbreak", "encoded_injection", "data_exfiltration",
     "social_engineering", "domain_misuse", "non_advice", "role_violation",
+    "harmful_content",
 )
+# Safety metrics that also read adversarial prompts from this store: Bias and
+# Toxicity send them before the goldens (a neutral golden rarely provokes a
+# biased or toxic reply), No-Prompt-Leak sends only them.
+SAFETY_PROBE_METRICS = ("bias", "toxicity", "no_prompt_leak")
+PROBE_METRICS = SECURITY_METRICS + SAFETY_PROBE_METRICS
 
 
 def _read_all() -> list[dict]:
@@ -61,8 +69,8 @@ def load_probes(metric: str | None = None, probe_set: str | None = None) -> list
 
 def _clean(fields: dict) -> dict:
     metric = fields.get("metric", "")
-    if metric not in SECURITY_METRICS:
-        raise ValueError(f"metric must be one of: {', '.join(SECURITY_METRICS)}")
+    if metric not in PROBE_METRICS:
+        raise ValueError(f"metric must be one of: {', '.join(PROBE_METRICS)}")
     question = fields.get("question", "").strip()
     if not question:
         raise ValueError("a probe needs a question")

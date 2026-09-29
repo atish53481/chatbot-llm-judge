@@ -12,6 +12,12 @@
     <h1>LLM Judge</h1>
     <p id="status" class="secondary" role="status">Checking backend…</p>
   </header>
+  <div id="run-banner" class="run-banner hidden">
+    <span id="run-banner-text" class="run-banner-text"></span>
+    <button type="button" id="run-banner-show" class="small-button">Show results</button>
+    <button type="button" id="run-banner-close" class="small-button" aria-label="Dismiss run status" title="Dismiss">×</button>
+  </div>
+  <span id="run-announce" class="sr-only" role="status"></span>
 
   <details id="judge-settings" class="card">
     <summary>Judge settings <span id="judge-summary" class="muted small"></span></summary>
@@ -74,6 +80,23 @@
             </div>
           </div>
         </details>
+        <details id="llm-import">
+          <summary>Or fill from an LLM API (OpenAI-compatible)</summary>
+          <div class="stack">
+            <p class="muted small">
+              Judging another model? Point the judge straight at its chat API &mdash; no request
+              capture needed. Filling these sets the fields below for you.
+            </p>
+            <label class="grow">Base URL <input id="llm-base-url" value="https://api.openai.com/v1" spellcheck="false"></label>
+            <label>Model <input id="llm-model" spellcheck="false" placeholder="e.g. gpt-4o-mini or openai/gpt-oss-120b"></label>
+            <label>API key <input id="llm-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="leave empty for a local model"></label>
+            <label>System prompt (optional) <textarea id="llm-system-prompt" rows="2" placeholder="e.g. You are a support assistant for ACME."></textarea></label>
+            <div class="row">
+              <button type="button" id="llm-fill">Fill from LLM API</button>
+              <span id="llm-status" class="small" role="status"></span>
+            </div>
+          </div>
+        </details>
         <div class="row">
           <label>Method
             <select id="target-method">
@@ -97,8 +120,8 @@
         </label>
         <label>Security probes
           <select id="target-probe-set" title="Which red-team probes the Security metrics send: E-commerce ones mention orders, refunds and customers; Generic ones fit any assistant.">
-            <option value="ecommerce">E-commerce (orders, refunds, customers)</option>
             <option value="generic">Generic (any assistant)</option>
+            <option value="ecommerce">E-commerce (orders, refunds, customers)</option>
           </select>
         </label>
         <label>Chatbot role (optional, for Security metrics)
