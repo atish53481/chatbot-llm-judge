@@ -478,3 +478,13 @@ def test_citation_metric_needs_the_chatbots_own_sources(tmp_path):
     target = CannedChatbot()
     target.context_path = "sources"
     assert run_spec(spec, judge=object(), target=target, target_id=target_id, conn=conn)["status"] == "pass"
+
+
+def test_recorded_run_keeps_the_full_result(tmp_path):
+    import json as _json
+    conn, target_id = _db(tmp_path)
+    spec = _fake_spec([_case("What is your refund window?")], _fake_metric([0.9], [True]))
+    result = run_spec(spec, judge=object(), target=CannedChatbot(), target_id=target_id, conn=conn)
+    saved = _json.loads(storage.latest_runs(conn, target_id)[0]["result_json"])
+    assert saved == _json.loads(_json.dumps(result))
+    assert saved["rows"][0]["question"] == "What is your refund window?"

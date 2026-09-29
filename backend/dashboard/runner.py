@@ -8,6 +8,7 @@ rate and the threshold a maximum. DeepEval gets the matching minimum
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import sqlite3
 import time
 
@@ -222,14 +223,7 @@ def run_spec(
     spread = max(spreads) if spreads else None
     previous = storage.history(conn, target_id, spec.key)
     previous_model = previous[-1].get("judge_model") if previous else None
-    # One row per run: the charts plot run averages, not individual cases.
-    storage.record_run(
-        conn, target_id, spec.key, avg, passed, _now_iso(), cases_run=len(rows),
-        judge_model=judge_model, judge_tokens=judge_tokens, judge_calls=judge_calls,
-        target_calls=chatbot_calls, duration_s=duration, judge_spread=spread,
-        cases_skipped=skipped,
-    )
-    return {
+    result = {
         "cases_skipped": skipped,
         "judge": {"model": judge_model, "tokens": judge_tokens, "calls": judge_calls},
         "chatbot_calls": chatbot_calls,
@@ -260,6 +254,15 @@ def run_spec(
             if spread is not None and spread > UNSTABLE_SPREAD else None,
         ),
     }
+    # One row per run: the charts plot run averages, not individual cases; the
+    # full result lets Details and the report show the cases from any browser.
+    storage.record_run(
+        conn, target_id, spec.key, avg, passed, _now_iso(), cases_run=len(rows),
+        judge_model=judge_model, judge_tokens=judge_tokens, judge_calls=judge_calls,
+        target_calls=chatbot_calls, duration_s=duration, judge_spread=spread,
+        cases_skipped=skipped, result_json=json.dumps(result, default=str),
+    )
+    return result
 
 
 # Two scorings of one reply further apart than this flag the run as unstable.
