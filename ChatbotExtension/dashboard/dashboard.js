@@ -215,6 +215,11 @@ async function onTargetChanged() {
   renderCases(await settings.get("lastRun", null));
   await Promise.all([renderLatest(), renderTrend()]);
   if (state.view === "history") await renderHistory();
+  // A run started earlier (from here or the side panel) is still going: follow it.
+  const job = target ? await activeJob(target) : null;
+  if (job && !state.running) {
+    followRun(target, job.metric_keys, (onProgress, control) => followJob(target, job.id, onProgress, control));
+  }
 }
 
 function hostOf(url) {
@@ -497,7 +502,10 @@ async function toggleCardDetails(key) {
   state.expandedDetailKeys.add(key);
   const target = currentTarget();
   if (target) {
-    [state.caseDetailsCache[key]] = await Promise.all([loadCaseDetails(target.id, key), loadDetailHistory(key)]);
+    // The backend keeps each run's cases; this browser's copy covers older runs.
+    const run = latestRowsCache.find((r) => r.metric_key === key);
+    const [stored] = await Promise.all([loadCaseDetails(target.id, key), loadDetailHistory(key)]);
+    state.caseDetailsCache[key] = caseDetailsFromRun(run) || stored;
   }
   renderMetricGrid();
 }
@@ -647,12 +655,21 @@ function stopUsagePolling() {
 async function runKeys(keys) {
   const target = currentTarget();
   if (!target || !keys.length) return;
+  await followRun(target, keys, (onProgress, control) => runMetrics(target, keys, onProgress, control));
+}
+
+// Shows a run on the cards and the status line until it ends: a new job, or one
+// already running when the dashboard opened. start(onProgress, control) runs or
+// follows the job.
+async function followRun(target, keys, start) {
   const byMetric = new Map(state.metrics.map((m) => [m.key, m]));
   beginRun();
   state.runControl.limit = state.casesPerRun;
+  state.runControl.metrics = state.metrics;
+  state.runControl.onOffline = (off) => { if (off) setStatus("Backend not reachable, retrying…", true); };
   startUsagePolling();
   try {
-    const results = await runMetrics(target, keys, (key, result, progress) => {
+    const results = await start((key, result, progress) => {
       const title = byMetric.get(key)?.title || key;
       if (result === null) {
         const fresh = !state.runningKeys.has(key);
@@ -675,6 +692,10 @@ async function runKeys(keys) {
       }
       renderMetricGrid();
     }, state.runControl);
+    const control = state.runControl;
+    if (control.jobStatus === "error" || control.jobStatus === "interrupted") {
+      setStatus(`Run ${control.jobStatus}: ${control.jobError || ""}`, true);
+    }
     const failed = results.filter((r) => r.status === "error").length;
     // Stop pressed between two metrics cancels nothing in flight; the loop just ends early.
     const stopped = results.some((r) => r.status === "cancelled") || results.length < keys.length;
@@ -689,6 +710,8 @@ async function runKeys(keys) {
       const avg = scored.length ? ` · average score ${formatScore(scored.reduce((a, b) => a + b, 0) / scored.length)}` : "";
       setStatus(`Finished ${keys.length} metrics${avg}${failed ? ` · ${failed} could not run` : ""}.`, failed > 0);
     }
+  } catch (error) {
+    setStatus(error.message, true);
   } finally {
     stopUsagePolling();
     endRun();

@@ -216,7 +216,8 @@ async function build() {
   ]);
   const latestByKey = Object.fromEntries(latest.map((r) => [r.metric_key, r]));
   const details = Object.fromEntries(await Promise.all(
-    metrics.map(async (m) => [m.key, await loadCaseDetails(target.id, m.key)]),
+    // The backend keeps each run's cases; this browser's copy covers older runs.
+    metrics.map(async (m) => [m.key, caseDetailsFromRun(latestByKey[m.key]) || await loadCaseDetails(target.id, m.key)]),
   ));
   document.title = `Evaluation report · ${target.name}`;
   const ranMetrics = metrics.filter((m) => latestByKey[m.key]);

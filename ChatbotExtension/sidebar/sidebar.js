@@ -95,6 +95,13 @@ async function onTargetChanged() {
   updateRunButton();
   resetConversationForm();
   await Promise.all([loadMetrics(), loadGoldens(), loadConversations(), renderLatest(), loadDocuments()]);
+  // A run started earlier (here before the panel closed, or from the dashboard)
+  // is still going: show its progress and Stop again.
+  const job = target ? await activeJob(target) : null;
+  if (job && state.runControl === null) {
+    const titles = new Map(state.metrics.map((m) => [m.key, m.title]));
+    watchRun(target, new Map(), titles, (onProgress, control) => followJob(target, job.id, onProgress, control));
+  }
 }
 
 // The target form doubles as the editor; resetTargetForm returns it to "add".
@@ -805,26 +812,42 @@ $("run-button").addEventListener("click", async () => {
     const metric = state.metrics.find((m) => m.key === key);
     renderSkippedRow(lines.get(key), titles.get(key) || key, themeOf(target), metric && metric.unavailable);
   }
+  const runnable = keys.filter((k) => !empty.has(k));
+  await watchRun(target, lines, titles, (onProgress, control) => runMetrics(target, runnable, onProgress, control));
+});
+
+// Shows a run in the results list, with Stop, until it ends: a new job, or one
+// already running (started before this panel was opened). lines holds the rows
+// already shown; start(onProgress, control) runs or follows the job.
+async function watchRun(target, lines, titles, start) {
   $("run-button").disabled = true;
-  state.runControl = {};
+  const control = {
+    metrics: state.metrics,
+    onOffline: (off) => { $("status").textContent = off ? "Backend not reachable, retrying…" : ""; },
+  };
+  state.runControl = control;
   $("stop-button").disabled = false;
   $("stop-button").textContent = "Stop";
   $("stop-button").classList.remove("hidden");
   try {
-    const runnable = keys.filter((k) => !empty.has(k));
-    const results = await runMetrics(target, runnable, (key, result, progress) => {
+    await start((key, result, progress) => {
       if (!lines.has(key)) {
         lines.set(key, el("li"));
         $("run-results").append(lines.get(key));
       }
       renderRunRow(lines.get(key), titles.get(key) || key, result, progress);
-    }, state.runControl);
+    }, control);
+    if (control.jobStatus === "error" || control.jobStatus === "interrupted") {
+      $("status").textContent = `Run ${control.jobStatus}: ${control.jobError || ""}`;
+    }
+  } catch (error) {
+    $("status").textContent = error.message;
   } finally {
     state.runControl = null;
     $("stop-button").classList.add("hidden");
     updateRunButton();
   }
-});
+}
 
 $("stop-button").addEventListener("click", async () => {
   if (!state.runControl) return;

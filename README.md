@@ -178,8 +178,10 @@ A Chrome notification says how the run went ("Shop bot: 18 passed · 2 failed
 toolbar icon shows a badge: a green ✓ when everything passed, the number of failed
 metrics in red, or an amber ! when a metric could not run. Clicking the
 notification opens (or focuses) the dashboard; opening the side panel or dashboard
-clears the badge. A run you stop yourself is not announced. Runs happen in the
-side panel or dashboard page, so closing that page stops the run.
+clears the badge. A run you stop yourself is not announced. Runs are backend
+jobs: closing the side panel or dashboard does not stop them, reopening either
+shows the live progress, and the notification arrives when the job ends (within 30
+seconds if no page is open).
 
 ## Details and the PDF report
 
