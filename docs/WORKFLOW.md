@@ -206,7 +206,7 @@ Ad-hoc scores are **not stored**, so the trend charts stay a record of golden-se
 - `python -m pytest -m smoke` — fast wiring checks only.
 - `set RUN_LIVE_JUDGE=1` then `python -m pytest -m live` — every metric against the
   real judge (spends tokens).
-- CI (`.github/workflows/ci.yml`) runs the offline suite on pushes to `main` and on
+- CI (`.github/workflows/ci.yml`) runs the offline suite on pushes to `master` and on
   pull requests; the live suite is a manual `workflow_dispatch` job that needs the
   `JUDGE_API_KEY` repository secret.
 

@@ -1,10 +1,10 @@
 name: CI
 
-# Runs the offline suite on every push to main and every pull request.
+# Runs the offline suite on every push to master and every pull request.
 # The live judge suite spends tokens, so it only runs when dispatched by hand.
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
