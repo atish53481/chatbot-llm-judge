@@ -44,11 +44,25 @@ async function watched() {
   return (await chrome.storage.session.get("watchedJobs")).watchedJobs || {};
 }
 
+// Checks and new watches take turns on one chain: a job is never announced
+// twice, and a job added while a check waits on the backend is never lost.
 let checking = Promise.resolve();
-function checkJobs() {
-  // One check at a time, so a job cannot be announced twice.
-  checking = checking.then(checkJobsNow).catch((error) => console.error("LLM Judge: job check failed", error));
+function inTurn(step, what) {
+  checking = checking.then(step).catch((error) => console.error(`LLM Judge: ${what} failed`, error));
   return checking;
+}
+
+function checkJobs() {
+  return inTurn(checkJobsNow, "job check");
+}
+
+function watchJob(jobId, target, metrics) {
+  return inTurn(async () => {
+    const jobs = await watched();
+    jobs[jobId] = { target, metrics };
+    await chrome.storage.session.set({ watchedJobs: jobs });
+    await chrome.alarms.create("watch-jobs", { periodInMinutes: 0.5 });
+  }, "watching the run");
 }
 
 async function checkJobsNow() {
@@ -88,12 +102,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   if (message.type === "OPEN_DASHBOARD") {
     chrome.tabs.create({ url: DASHBOARD_URL });
   } else if (message.type === "WATCH_JOB" && message.jobId) {
-    watched()
-      .then((jobs) => chrome.storage.session.set({
-        watchedJobs: { ...jobs, [message.jobId]: { target: message.target, metrics: message.metrics || [] } },
-      }))
-      .then(() => chrome.alarms.create("watch-jobs", { periodInMinutes: 0.5 }))
-      .catch((error) => console.error("LLM Judge: could not watch the run", error));
+    watchJob(message.jobId, message.target, message.metrics || []);
   } else if (message.type === "JOB_ENDED") {
     checkJobs();
   } else if (message.type === "CLEAR_BADGE") {

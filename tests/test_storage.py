@@ -186,7 +186,8 @@ def test_jobs_are_stored_listed_and_updated(tmp_path):
     assert storage.next_queued_job(conn)["id"] == first
     storage.update_job(conn, first, status="running", current={"metric_key": "bias"})
     assert storage.get_job(conn, first)["current"] == {"metric_key": "bias"}
-    assert [j["id"] for j in storage.active_jobs(conn, 1)] == [second, first]
+    # The running job first, then the queue in run order.
+    assert [j["id"] for j in storage.active_jobs(conn, 1)] == [first, second]
     storage.update_job(conn, first, status="done", results=[{"key": "bias"}])
     assert storage.next_queued_job(conn)["id"] == second
     assert [j["id"] for j in storage.active_jobs(conn, 1)] == [second]
@@ -214,3 +215,11 @@ def test_runs_keep_their_full_result(tmp_path):
     target_id = storage.add_target(conn, "bot", "http", {})
     storage.record_run(conn, target_id, "m", 0.8, True, "2026-01-01T00:00:00Z", result_json='{"rows": []}')
     assert storage.latest_runs(conn, target_id)[0]["result_json"] == '{"rows": []}'
+
+
+def test_active_jobs_list_the_running_one_first(tmp_path):
+    conn = storage.init_db(str(tmp_path / "j.db"))
+    running = storage.add_job(conn, 1, ["a"], {})
+    queued = storage.add_job(conn, 1, ["b"], {})
+    storage.update_job(conn, running, status="running")
+    assert [j["id"] for j in storage.active_jobs(conn, 1)] == [running, queued]

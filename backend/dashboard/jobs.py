@@ -1,17 +1,22 @@
 """Background runs: a job is one batch of metrics for one chatbot.
 
 Jobs run one at a time, in creation order, on a single worker thread, so a run
-keeps going after the page that started it closes, and the token counts each run
-records (the change in the usage counters) stay per run. Jobs and their results
+keeps going after the page that started it closes. Each run's token counts are
+the change in the process-wide usage counters, so judge or chatbot calls made
+meanwhile (ad-hoc judging, golden generation, the dashboard chat) are counted
+in the run that was going at the time. Jobs and their results
 live in SQLite; live progress is kept in memory and merged in by get().
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 
 from backend import storage
 from backend.dashboard.runner import RunCancelled, _now_iso
+
+logger = logging.getLogger(__name__)
 
 
 class JobFailed(Exception):
@@ -80,6 +85,10 @@ class JobQueue:
             except JobFailed as e:
                 status, error = "error", str(e)
                 break
+            except Exception as e:  # noqa: BLE001 - never leave a job "running" forever
+                logger.exception("LLM Judge: job %s failed on %s", job_id, key)
+                status, error = "error", f"{type(e).__name__}: {e}"
+                break
             results.append(result)
             storage.update_job(self._conn, job_id, results=results)
             if result.get("status") == "cancelled":
@@ -103,6 +112,7 @@ class JobQueue:
             try:
                 ran = self.process_next()
             except Exception:  # noqa: BLE001 - the worker must survive one bad job
+                logger.exception("LLM Judge: job worker error")
                 ran = False
             if not ran:
                 self._wake.wait(timeout=5)

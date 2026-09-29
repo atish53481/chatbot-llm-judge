@@ -337,7 +337,9 @@ def update_job(conn: sqlite3.Connection, job_id: int, **fields) -> None:
 def active_jobs(conn: sqlite3.Connection, target_id: int) -> list[dict]:
     with _LOCK:
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE target_id = ? AND status IN ('queued', 'running') ORDER BY id DESC",
+            # The running job first, then the queue in the order it will run.
+            "SELECT * FROM jobs WHERE target_id = ? AND status IN ('queued', 'running') "
+            "ORDER BY status = 'running' DESC, id",
             (target_id,),
         ).fetchall()
     return [_job(r) for r in rows]

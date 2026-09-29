@@ -101,3 +101,19 @@ def test_worker_thread_runs_submitted_jobs(tmp_path):
     queue.start()
     queue.submit(1, ["a"], {})
     assert finished.wait(5)
+
+
+def test_an_unexpected_error_ends_the_job_instead_of_leaving_it_running(tmp_path):
+    def run(job, key, p):
+        if key == "a":
+            raise ValueError("judge config broken")
+        return {"key": key, "status": "pass"}
+    queue, _ = _queue(tmp_path, run)
+    job_id = queue.submit(1, ["a", "b"], {})
+    assert queue.process_next()
+    job = queue.get(job_id)
+    assert job["status"] == "error" and job["error"] == "ValueError: judge config broken"
+    assert job["current"] is None and job["finished_at"]
+    # The queue keeps working after it.
+    later = queue.submit(1, ["b"], {})
+    assert queue.process_next() and queue.get(later)["status"] == "done"

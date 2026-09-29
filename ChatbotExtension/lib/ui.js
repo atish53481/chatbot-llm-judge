@@ -117,6 +117,7 @@ function targetLabel(target) {
 // "Metric 2/7 · 3/10 · judging: What is your refund window? · 0:42" for a run in flight.
 function progressText(progress) {
   if (!progress) return "starting…";
+  if (progress.queued) return "waiting for the run before it to finish…";
   const parts = [];
   if (progress.metricCount > 1) parts.push(`metric ${progress.metricIndex + 1}/${progress.metricCount}`);
   if (progress.total) {
@@ -253,6 +254,7 @@ function jobProgress(current) {
 // how a Stop button reaches the job (stopRun); control.limit is the dashboard's
 // cases per run and control.metrics the catalog, for the notification's titles.
 async function runMetrics(target, metricKeys, onProgress, control = {}) {
+  if (!metricKeys.length) return [];  // nothing this chatbot can run
   const thresholds = await settings.get("thresholds", {});
   const checkConsistency = await settings.get("checkConsistency", false);
   const picked = Object.fromEntries(metricKeys
@@ -282,16 +284,20 @@ function watchJob(target, jobId, metrics) {
 async function followJob(target, jobId, onProgress, control = {}) {
   control.jobId = jobId;
   const reported = new Set();
+  let offline = false;
   for (;;) {
     let job;
     try {
       job = await api(`/api/jobs/${jobId}`);
-      if (control.onOffline) control.onOffline(false);
     } catch (error) {
-      if (control.onOffline) control.onOffline(true, error);
+      // Tell the page once when the backend stops answering, not on every retry.
+      if (!offline && control.onOffline) control.onOffline(true, error);
+      offline = true;
       await sleep(2000);
       continue;
     }
+    if (offline && control.onOffline) control.onOffline(false);
+    offline = false;
     for (const result of job.results) {
       if (reported.has(result.key)) continue;
       reported.add(result.key);
@@ -303,6 +309,11 @@ async function followJob(target, jobId, onProgress, control = {}) {
     }
     if (job.current && !reported.has(job.current.metric_key)) {
       onProgress(job.current.metric_key, null, jobProgress(job.current));
+    } else if (job.status === "queued" && job.metric_keys && job.metric_keys.length) {
+      // Waiting behind another run: say so instead of looking hung.
+      onProgress(job.metric_keys[0], null, {
+        queued: true, metricIndex: 0, metricCount: job.metric_keys.length, startedAt: Date.now(),
+      });
     }
     if (job.status !== "queued" && job.status !== "running") {
       chrome.runtime.sendMessage({ type: "JOB_ENDED", jobId }).catch(() => {});
