@@ -56,6 +56,41 @@ main {
 
 .toolbar button:disabled { opacity: 0.5; cursor: default; }
 
+/* On-page choices of what the report includes; hidden when printing. */
+.options {
+  max-width: 820px;
+  margin: 12px auto 0;
+  padding: 0 16px;
+  font-size: 10pt;
+}
+
+.options fieldset {
+  margin: 0 0 8px;
+  padding: 6px 10px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.options legend { font-weight: 600; padding: 0 4px; }
+.option { display: inline-flex; align-items: center; margin: 2px 14px 2px 0; cursor: pointer; }
+.option-group { margin: 4px 0; }
+.option-group > b { display: block; font-size: 9pt; color: var(--muted); }
+.option-actions { margin: 0 0 4px; display: flex; gap: 6px; }
+
+.option-actions button {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--band);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.options input:focus-visible,
+.options button:focus-visible,
+.toolbar button:focus-visible { outline: 2px solid #256abf; outline-offset: 2px; }
+
 h1 { font-size: 22pt; margin: 0 0 4px; }
 h2 { font-size: 15pt; margin: 22px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
 h3 { font-size: 12.5pt; margin: 18px 0 6px; }
@@ -78,7 +113,7 @@ h4 { font-size: 11pt; margin: 12px 0 6px; }
 
 .headline {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 8px;
   margin: 14px 0 6px;
 }
@@ -126,6 +161,27 @@ table.summary td {
 table.summary th { background: var(--band); }
 table.summary .num { text-align: right; white-space: nowrap; }
 
+/* Test case results: DeepEval-style grid, one test case per row group. */
+table.cases {
+  font: 8.5pt/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  border: 1px solid var(--text);
+}
+
+table.cases th,
+table.cases td { border: 1px solid var(--line); overflow-wrap: anywhere; }
+table.cases th { border-bottom: 1.5px solid var(--text); }
+table.cases th:nth-child(1) { width: 22%; }
+table.cases th:nth-child(2) { width: 15%; }
+table.cases th:nth-child(4) { width: 9%; }
+table.cases th:nth-child(5) { width: 11%; }
+table.cases tr.group-start td { border-top: 1.5px solid var(--text); }
+table.cases tr { break-inside: avoid; }
+table.cases tfoot td { background: var(--band); font-size: 10pt; }
+table.cases .tip { margin: 4px 0 0; padding-top: 3px; border-top: 1px dashed var(--line); }
+.status { font-weight: 700; }
+.status.pass { color: var(--pass); }
+.status.fail { color: var(--fail); }
+
 .verdict { font-weight: 600; margin: 6px 0; }
 .verdict.pass { color: var(--pass); }
 .verdict.fail { color: var(--fail); }
@@ -144,7 +200,15 @@ table.summary .num { text-align: right; white-space: nowrap; }
   break-inside: avoid;
 }
 
+.case.pass {
+  border-left-color: var(--pass);
+  background: #f5faf5;
+}
+
 .case-head { margin: 0 0 4px; font-weight: 600; }
+
+/* Words the other answer (actual vs expected) does not have. */
+b.diff { font-weight: 700; }
 
 .plan-item {
   margin: 10px 0;
@@ -167,5 +231,6 @@ table.summary .num { text-align: right; white-space: nowrap; }
 
 @media (max-width: 600px) {
   .headline { grid-template-columns: repeat(2, 1fr); }
+  table.cases { display: block; overflow-x: auto; }
   .facts { grid-template-columns: 1fr; }
 }
