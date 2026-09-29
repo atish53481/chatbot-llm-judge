@@ -1,6 +1,7 @@
 """FastAPI backend: the control panel behind the Chrome sidebar and dashboard."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -15,6 +16,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from backend import storage, usage
+from backend.dashboard.jobs import JobFailed, JobQueue
 from backend.dashboard.runner import NEEDS_OWN_SOURCES, RunCancelled, judge_one, run_spec
 from backend.datasets import conversations as conversations_store
 from backend.datasets import goldens as goldens_store
@@ -79,6 +81,39 @@ _conn = storage.init_db(DB_PATH)
 _progress: dict[str, dict] = {}
 _cancelled: set[str] = set()
 _progress_lock = threading.Lock()
+
+
+def _run_job_metric(job: dict, metric_key: str, on_progress) -> dict:
+    """Runs one metric of a background job, exactly as /api/run does."""
+    row = storage.get_target(_conn, job["target_id"])
+    if row is None:
+        raise JobFailed("chatbot deleted")
+    spec = SPECS_BY_KEY.get(metric_key)
+    if spec is None:
+        return {"key": metric_key, "status": "error", "error": "metric not found", "score": None, "rows": []}
+    try:
+        judge = build_judge(**_judge_overrides())
+    except RuntimeError as e:
+        raise JobFailed(str(e)) from e
+    try:
+        target = _client_or_400(row)
+    except HTTPException as e:
+        raise JobFailed(str(e.detail)) from e
+    options, config = job["options"], row["config"]
+    return run_spec(
+        spec, judge, target, job["target_id"], _conn,
+        theme=config.get("theme") or DEFAULT_THEME,
+        threshold=(options.get("thresholds") or {}).get(metric_key),
+        on_progress=on_progress, persona=config.get("persona", ""), limit=options.get("limit"),
+        probe_set=config.get("probe_set", ""), check_consistency=bool(options.get("check_consistency")),
+    )
+
+
+# Background runs: one job at a time on a worker thread (backend/dashboard/jobs.py).
+# Tests run queued jobs themselves (JUDGE_START_JOB_WORKER=0) instead of racing it.
+jobs = JobQueue(_conn, _run_job_metric)
+if os.getenv("JUDGE_START_JOB_WORKER", "1") != "0":
+    jobs.start()
 
 
 class TargetCreate(BaseModel):
@@ -822,6 +857,56 @@ def api_run_progress(run_id: str):
     return {"active": state is not None, **(state or {})}
 
 
+class JobCreate(BaseModel):
+    target_id: int
+    metric_keys: list[str]
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    limit: int | None = Field(default=None, ge=1)
+    check_consistency: bool = False
+
+
+class JobCancel(BaseModel):
+    """Empty on purpose: a JSON body forces the CORS preflight, like every other POST."""
+
+
+@app.post("/api/jobs")
+def api_create_job(body: JobCreate):
+    """Queues a batch of metrics; it runs in the background, even with no page open."""
+    _target_or_404(body.target_id)
+    if not body.metric_keys:
+        raise HTTPException(status_code=400, detail="pick at least one metric")
+    unknown = [k for k in body.metric_keys if k not in SPECS_BY_KEY]
+    if unknown:
+        raise HTTPException(status_code=404, detail=f"metric not found: {', '.join(unknown)}")
+    try:
+        build_judge(**_judge_overrides())
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    job_id = jobs.submit(body.target_id, body.metric_keys, {
+        "thresholds": body.thresholds, "limit": body.limit, "check_consistency": body.check_consistency,
+    })
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/jobs/{job_id}")
+def api_get_job(job_id: int):
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@app.get("/api/jobs")
+def api_list_jobs(target_id: int, active: int = 1):
+    """Jobs still queued or running for a chatbot, so a reopened page can reattach."""
+    return jobs.active(target_id)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def api_cancel_job(job_id: int, _body: JobCancel):
+    return {"cancelling": jobs.cancel(job_id)}
+
+
 @app.post("/api/judge")
 def api_judge(body: JudgeOneRequest):
     """Scores one answer the user collected by hand. Nothing is persisted.
@@ -865,10 +950,18 @@ def api_chat(req: ChatRequest):
 
 @app.get("/api/runs/latest")
 def api_runs_latest(target_id: int):
-    return storage.latest_runs(_conn, target_id)
+    rows = storage.latest_runs(_conn, target_id)
+    # Each run's full result (cases, note, judge facts) for Details and the report.
+    for row in rows:
+        raw = row.pop("result_json", None)
+        row["result"] = json.loads(raw) if raw else None
+    return rows
 
 
 @app.get("/api/history")
 def api_history(target_id: int, metric_key: str):
-    return storage.history(_conn, target_id, metric_key)
+    rows = storage.history(_conn, target_id, metric_key)
+    for row in rows:
+        row.pop("result_json", None)  # the trend needs scores, not every case
+    return rows
 

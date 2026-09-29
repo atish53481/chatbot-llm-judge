@@ -20,6 +20,8 @@ def app_module(tmp_path, monkeypatch):
     # before the first import; later tests in the session reuse that database.
     monkeypatch.setenv("JUDGE_DB_PATH", str(tmp_path / "app_test.db"))
     monkeypatch.setenv("JUDGE_API_KEY", "fake-key")
+    # Tests run queued jobs themselves instead of racing the worker thread.
+    monkeypatch.setenv("JUDGE_START_JOB_WORKER", "0")
     # API tests must never rewrite the tracked goldens.json.
     goldens_copy = tmp_path / "goldens.json"
     shutil.copy(goldens_store.GOLDENS_PATH, goldens_copy)
@@ -1023,3 +1025,56 @@ def test_citation_quality_is_not_applicable_without_the_chatbots_sources(client)
     with_sources = _create_target(client, config={"context_path": "sources", "theme": "general_support"})
     rows = {m["key"]: m for m in client.get(f"/api/metrics?target_id={with_sources['id']}").json()}
     assert rows["citation_quality"]["cases_available"] > 0 and rows["citation_quality"]["unavailable"] is None
+
+
+def _run_jobs(app_module):
+    """Runs every queued job now (tests do not rely on the worker thread's timing)."""
+    while app_module.jobs.process_next():
+        pass
+
+
+def test_job_runs_every_metric_and_records_them(client, app_module):
+    target = _create_target(client)
+    with patch.object(app_module, "build_judge", return_value=object()),          patch.object(app_module, "SPECS_BY_KEY", {"answer_relevancy": _fake_spec([]), "bias": _fake_spec([])}),          patch.object(app_module.HttpTargetClient, "chat", return_value=_REPLY):
+        created = client.post("/api/jobs", json={"target_id": target["id"],
+                                                 "metric_keys": ["answer_relevancy", "bias"],
+                                                 "thresholds": {"bias": 0.5}}).json()
+        assert created["status"] == "queued"
+        active = client.get("/api/jobs", params={"target_id": target["id"], "active": 1}).json()
+        assert [j["id"] for j in active] == [created["job_id"]]
+        _run_jobs(app_module)
+    job = client.get(f"/api/jobs/{created['job_id']}").json()
+    assert job["status"] == "done" and len(job["results"]) == 2
+    assert client.get("/api/jobs", params={"target_id": target["id"], "active": 1}).json() == []
+    latest = client.get("/api/runs/latest", params={"target_id": target["id"]}).json()
+    assert latest and latest[0]["result"]["rows"] and "result_json" not in latest[0]
+
+
+def test_job_requests_are_validated(client, app_module):
+    target = _create_target(client)
+    assert client.post("/api/jobs", json={"target_id": 999999, "metric_keys": ["bias"]}).status_code == 404
+    assert client.post("/api/jobs", json={"target_id": target["id"], "metric_keys": ["nope"]}).status_code == 404
+    assert client.post("/api/jobs", json={"target_id": target["id"], "metric_keys": []}).status_code == 400
+    assert client.get("/api/jobs/999999").status_code == 404
+    with patch.object(app_module, "build_judge", side_effect=RuntimeError("no judge key")):
+        r = client.post("/api/jobs", json={"target_id": target["id"], "metric_keys": ["bias"]})
+    assert r.status_code == 503
+
+
+def test_job_for_a_deleted_chatbot_fails_clearly(client, app_module):
+    target = _create_target(client)
+    with patch.object(app_module, "build_judge", return_value=object()):
+        job_id = client.post("/api/jobs", json={"target_id": target["id"], "metric_keys": ["bias"]}).json()["job_id"]
+        client.delete(f"/api/targets/{target['id']}")
+        _run_jobs(app_module)
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "error" and job["error"] == "chatbot deleted"
+
+
+def test_queued_job_can_be_cancelled(client, app_module):
+    target = _create_target(client)
+    with patch.object(app_module, "build_judge", return_value=object()):
+        job_id = client.post("/api/jobs", json={"target_id": target["id"], "metric_keys": ["bias"]}).json()["job_id"]
+    assert client.post(f"/api/jobs/{job_id}/cancel", json={}).json() == {"cancelling": True}
+    _run_jobs(app_module)
+    assert client.get(f"/api/jobs/{job_id}").json()["status"] == "cancelled"
